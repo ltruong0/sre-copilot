@@ -113,6 +113,7 @@ class DocumentRetriever:
         query: str,
         top_k: int | None = None,
         category_filter: str | None = None,
+        path_filter: str | None = None,
     ) -> list[RetrievedChunk]:
         """Retrieve relevant chunks for a query.
 
@@ -120,6 +121,7 @@ class DocumentRetriever:
             query: The search query.
             top_k: Override default top_k.
             category_filter: Optional category to filter by.
+            path_filter: Optional path prefix to filter by (e.g., "sre/netbox-enterprise/").
 
         Returns:
             List of retrieved chunks sorted by relevance.
@@ -137,9 +139,12 @@ class DocumentRetriever:
         if category_filter:
             where_filter = {"category": category_filter}
 
+        # If path filtering, retrieve more results to filter post-query
+        query_limit = top_k * 3 if path_filter else top_k
+
         results = collection.query(
             query_embeddings=[query_embedding],
-            n_results=top_k,
+            n_results=query_limit,
             where=where_filter,
             include=["documents", "metadatas", "distances"],
         )
@@ -160,8 +165,18 @@ class DocumentRetriever:
             )
 
             # Apply similarity threshold
-            if chunk.similarity_score >= self._similarity_threshold:
-                chunks.append(chunk)
+            if chunk.similarity_score < self._similarity_threshold:
+                continue
+
+            # Apply path filter
+            if path_filter and path_filter not in chunk.document_path:
+                continue
+
+            chunks.append(chunk)
+
+            # Stop once we have enough results
+            if len(chunks) >= top_k:
+                break
 
         logger.debug(
             "Retrieved chunks",

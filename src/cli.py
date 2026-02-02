@@ -254,15 +254,16 @@ async def _ingest(settings, full: bool = False, llm_cleanup: bool = False) -> No
 @main.command()
 @click.argument("question")
 @click.option("--top-k", type=int, default=None, help="Number of chunks to retrieve (default: RAG_TOP_K)")
+@click.option("--path", type=str, default=None, help="Filter results by document path prefix (e.g., 'sre/netbox-enterprise/')")
 @click.pass_context
-def query(ctx: click.Context, question: str, top_k: int | None) -> None:
+def query(ctx: click.Context, question: str, top_k: int | None, path: str | None) -> None:
     """Query the documentation."""
     settings = ctx.obj["settings"]
     top_k = top_k if top_k is not None else settings.rag_top_k
-    asyncio.run(_query(settings, question, top_k))
+    asyncio.run(_query(settings, question, top_k, path))
 
 
-async def _query(settings, question: str, top_k: int) -> None:  # noqa: ANN001
+async def _query(settings, question: str, top_k: int, path_filter: str | None) -> None:  # noqa: ANN001
     """Run a RAG query."""
     from src.rag.generator import RAGGenerator
     from src.rag.retriever import DocumentRetriever
@@ -288,7 +289,7 @@ async def _query(settings, question: str, top_k: int) -> None:  # noqa: ANN001
         console=console,
     ) as progress:
         progress.add_task("Searching documentation...", total=None)
-        result = await generator.generate_answer(question)
+        result = await generator.generate_answer(question, path_filter=path_filter)
 
     console.print("\n[bold]Answer:[/bold]")
     console.print(result.answer)

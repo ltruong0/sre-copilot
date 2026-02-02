@@ -103,6 +103,7 @@ class Chunker:
         max_tokens: int = 1000,
         target_tokens: int = 500,
         tokenizer_model: str = "cl100k_base",
+        split_heading_level: int = 2,
     ):
         """Initialize the chunker.
 
@@ -111,10 +112,13 @@ class Chunker:
             max_tokens: Maximum tokens per chunk.
             target_tokens: Target tokens per chunk.
             tokenizer_model: Tiktoken model for counting tokens.
+            split_heading_level: Only split on headings at or above this level (1=H1, 2=H2, etc).
+                                 H3+ content stays with parent section. Default is 2.
         """
         self.min_tokens = min_tokens
         self.max_tokens = max_tokens
         self.target_tokens = target_tokens
+        self.split_heading_level = split_heading_level
         self._tokenizer = tiktoken.get_encoding(tokenizer_model)
 
     def count_tokens(self, text: str) -> int:
@@ -178,7 +182,11 @@ class Chunker:
         return chunks
 
     def _split_into_sections(self, content: str, title: str) -> list[Section]:
-        """Split content into sections by headings."""
+        """Split content into sections by headings.
+
+        Only splits on headings at or above split_heading_level.
+        Lower-level headings (H3+ by default) stay with their parent section.
+        """
         sections: list[Section] = []
         context = HeadingContext(h1=title)
 
@@ -189,6 +197,12 @@ class Chunker:
             # No headings, treat entire content as one section
             return [Section(content=content, context=context.copy(), level=1)]
 
+        # Filter to only split-level headings for section boundaries
+        split_points = [
+            (i, m) for i, m in enumerate(heading_matches)
+            if len(m.group(1)) <= self.split_heading_level
+        ]
+
         # Process content before first heading
         first_heading_pos = heading_matches[0].start()
         if first_heading_pos > 0:
@@ -196,8 +210,8 @@ class Chunker:
             if intro:
                 sections.append(Section(content=intro, context=context.copy(), level=0))
 
-        # Process each heading and its content
-        for i, match in enumerate(heading_matches):
+        # Process each split-point heading and all content until the next split point
+        for idx, (match_idx, match) in enumerate(split_points):
             level = len(match.group(1))
             heading_text = match.group(2).strip()
 
@@ -212,21 +226,20 @@ class Chunker:
             elif level == 3:
                 context.h3 = heading_text
 
-            # Get content until next heading
-            start = match.end()
-            if i + 1 < len(heading_matches):
-                end = heading_matches[i + 1].start()
+            # Get content from this heading until next split-point heading
+            start = match.start()
+            if idx + 1 < len(split_points):
+                # Next split point
+                end = split_points[idx + 1][1].start()
             else:
+                # End of content
                 end = len(content)
 
             section_content = content[start:end].strip()
 
-            # Include heading in content for context
-            full_content = f"{match.group(0)}\n\n{section_content}".strip()
-
-            if full_content:
+            if section_content:
                 sections.append(
-                    Section(content=full_content, context=context.copy(), level=level)
+                    Section(content=section_content, context=context.copy(), level=level)
                 )
 
         return sections

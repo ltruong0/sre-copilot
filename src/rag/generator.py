@@ -84,6 +84,7 @@ Answer:"""
         question: str,
         top_k: int | None = None,
         category_filter: str | None = None,
+        path_filter: str | None = None,
     ) -> RAGResult:
         """Generate an answer for a question using RAG.
 
@@ -91,6 +92,7 @@ Answer:"""
             question: The user's question.
             top_k: Override number of chunks to retrieve.
             category_filter: Optional category filter.
+            path_filter: Optional path prefix filter.
 
         Returns:
             RAGResult with answer and sources.
@@ -100,6 +102,7 @@ Answer:"""
             query=question,
             top_k=top_k,
             category_filter=category_filter,
+            path_filter=path_filter,
         )
 
         if not chunks:
