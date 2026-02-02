@@ -1,0 +1,33 @@
+site_name: Acme Corp SRE Documentation
+site_description: Internal SRE knowledge base for Acme Corp infrastructure
+theme:
+  name: material
+  palette:
+    primary: indigo
+    accent: indigo
+nav:
+  - Home: index.md
+  - Runbooks:
+    - Pod CrashLoopBackOff: runbooks/pod-crashloopbackoff.md
+    - Node Not Ready: runbooks/node-not-ready.md
+    - Certificate Renewal: runbooks/certificate-renewal.md
+    - Database Failover: runbooks/database-failover.md
+    - High Memory Usage: runbooks/high-memory-usage.md
+  - Architecture:
+    - Platform Overview: architecture/platform-overview.md
+    - Networking: architecture/networking.md
+    - Storage: architecture/storage.md
+    - CI/CD Pipeline: architecture/cicd.md
+  - Troubleshooting:
+    - Image Pull Errors: troubleshooting/image-pull-errors.md
+    - DNS Resolution: troubleshooting/dns-resolution.md
+    - PVC Issues: troubleshooting/pvc-issues.md
+    - Ingress 502 Errors: troubleshooting/ingress-502.md
+  - Onboarding:
+    - New Engineer Setup: onboarding/new-engineer.md
+    - Access Requests: onboarding/access-requests.md
+    - Tooling Guide: onboarding/tooling.md
+  - Policies:
+    - Incident Response: policies/incident-response.md
+    - Change Management: policies/change-management.md
+    - On-Call Rotation: policies/on-call.md
