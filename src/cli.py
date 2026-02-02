@@ -253,11 +253,12 @@ async def _ingest(settings, full: bool = False, llm_cleanup: bool = False) -> No
 
 @main.command()
 @click.argument("question")
-@click.option("--top-k", type=int, default=5, help="Number of chunks to retrieve")
+@click.option("--top-k", type=int, default=None, help="Number of chunks to retrieve (default: RAG_TOP_K)")
 @click.pass_context
-def query(ctx: click.Context, question: str, top_k: int) -> None:
+def query(ctx: click.Context, question: str, top_k: int | None) -> None:
     """Query the documentation."""
     settings = ctx.obj["settings"]
+    top_k = top_k if top_k is not None else settings.rag_top_k
     asyncio.run(_query(settings, question, top_k))
 
 

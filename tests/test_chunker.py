@@ -181,9 +181,10 @@ Content 2.
         # All IDs should be unique
         assert len(ids) == len(set(ids))
 
-        # IDs should start with hash prefix
+        # IDs should contain the content hash and be formatted as path_hash_content_hash_index
         for chunk_id in ids:
-            assert chunk_id.startswith("abc123")
+            assert "abc123" in chunk_id  # Content hash should be present
+            assert chunk_id.count("_") == 2  # Format: path_hash_content_hash_index
 
     def test_large_section_splitting(self, sample_markdown: str) -> None:
         """Test splitting of large sections."""

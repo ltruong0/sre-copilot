@@ -1,5 +1,6 @@
 """Semantic chunker for markdown documents."""
 
+import hashlib
 import re
 from dataclasses import dataclass, field
 
@@ -7,6 +8,16 @@ import structlog
 import tiktoken
 
 logger = structlog.get_logger(__name__)
+
+
+def _generate_chunk_id(document_path: str, content_hash: str, index: int) -> str:
+    """Generate a unique chunk ID from document path and content hash.
+
+    Combines document path and content hash to ensure uniqueness across
+    documents with identical content.
+    """
+    path_hash = hashlib.md5(document_path.encode()).hexdigest()[:8]
+    return f"{path_hash}_{content_hash[:8]}_{index}"
 
 
 @dataclass
@@ -234,7 +245,7 @@ class Chunker:
 
         if token_count <= self.max_tokens:
             # Section fits in one chunk
-            chunk_id = f"{content_hash[:12]}_{start_index}"
+            chunk_id = _generate_chunk_id(document_path, content_hash, start_index)
             return [
                 Chunk(
                     chunk_id=chunk_id,
@@ -301,7 +312,7 @@ class Chunker:
                 for placeholder, unit in placeholder_map.items():
                     chunk_content = chunk_content.replace(placeholder, unit)
 
-                chunk_id = f"{content_hash[:12]}_{start_index + len(chunks)}"
+                chunk_id = _generate_chunk_id(document_path, content_hash, start_index + len(chunks))
                 chunks.append(
                     Chunk(
                         chunk_id=chunk_id,
@@ -396,7 +407,7 @@ class Chunker:
             ):
                 # Merge chunks
                 combined_content = f"{current.content}\n\n{chunk.content}"
-                chunk_id = f"{content_hash[:12]}_{len(merged)}"
+                chunk_id = _generate_chunk_id(document_path, content_hash, len(merged))
                 current = Chunk(
                     chunk_id=chunk_id,
                     content=combined_content,
@@ -412,6 +423,6 @@ class Chunker:
 
         # Renumber chunk IDs
         for i, chunk in enumerate(merged):
-            chunk.chunk_id = f"{content_hash[:12]}_{i}"
+            chunk.chunk_id = _generate_chunk_id(document_path, content_hash, i)
 
         return merged
