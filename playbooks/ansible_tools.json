@@ -1,0 +1,22 @@
+{
+  "tools": [
+    {
+      "name": "check_security",
+      "playbook": "check_security_vulnerabilities.yml",
+      "description": "Run security vulnerability scan on hosts. Checks for CVEs, security patches, and vulnerabilities.",
+      "keywords": ["security", "vulnerability", "vulnerabilities", "cve", "scan", "patch", "secure"]
+    },
+    {
+      "name": "get_host_info",
+      "playbook": "get_host_info.yml",
+      "description": "Get system information from hosts including OS version, CPU, RAM, disk space, network, and uptime.",
+      "keywords": ["info", "system", "host", "cpu", "ram", "memory", "disk", "space", "uptime", "os", "version"]
+    },
+    {
+      "name": "ping_host",
+      "playbook": "ping_host.yml",
+      "description": "Check if a host is reachable by pinging it via Ansible.",
+      "keywords": ["ping", "reachable", "alive", "up", "connectivity", "connect", "reach", "online"]
+    }
+  ]
+}

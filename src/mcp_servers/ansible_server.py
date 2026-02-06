@@ -1,12 +1,14 @@
 """MCP server for Ansible and OpenShift operations.
 
 This server provides tools for running Ansible playbooks and interacting
-with OpenShift/Kubernetes clusters.
+with OpenShift/Kubernetes clusters. Tools are dynamically loaded from
+playbooks/ansible_tools.json.
 """
 
 import asyncio
 import json
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +22,47 @@ from src.config import Settings
 logger = structlog.get_logger(__name__)
 
 MAX_OUTPUT_LENGTH = 4000
+
+
+@dataclass
+class AnsibleToolDef:
+    """Definition of an ansible-based tool."""
+
+    name: str
+    playbook: str
+    description: str
+    keywords: list[str]
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "AnsibleToolDef":
+        """Create from a dictionary."""
+        return cls(
+            name=data["name"],
+            playbook=data["playbook"],
+            description=data["description"],
+            keywords=data.get("keywords", []),
+        )
+
+
+def load_ansible_tools(playbooks_dir: Path) -> list[AnsibleToolDef]:
+    """Load ansible tools from the JSON config file."""
+    config_path = playbooks_dir / "ansible_tools.json"
+
+    if not config_path.exists():
+        logger.warning("ansible_tools.json not found", path=str(config_path))
+        return []
+
+    try:
+        with open(config_path) as f:
+            data = json.load(f)
+
+        tools = [AnsibleToolDef.from_dict(t) for t in data.get("tools", [])]
+        logger.info("Loaded ansible tools for MCP", count=len(tools))
+        return tools
+
+    except (json.JSONDecodeError, KeyError) as e:
+        logger.error("Failed to load ansible_tools.json", error=str(e))
+        return []
 
 
 def run_playbook(
@@ -39,7 +82,6 @@ def run_playbook(
     Returns:
         Tuple of (success, stdout, stderr).
     """
-    # Resolve to absolute path
     abs_playbook_path = playbook_path.resolve()
     cmd = [settings.ansible_playbook_cmd, str(abs_playbook_path)]
 
@@ -83,6 +125,19 @@ def run_playbook(
         return False, "", f"Error executing playbook: {str(e)}"
 
 
+def _get_available_playbooks(settings: Settings) -> list[str]:
+    """Get list of available playbooks."""
+    playbooks_dir = settings.ansible_playbooks_dir
+    if not playbooks_dir.exists():
+        return []
+
+    return sorted(
+        f.name for f in playbooks_dir.glob("*.yml") if f.is_file()
+    ) + sorted(
+        f.name for f in playbooks_dir.glob("*.yaml") if f.is_file()
+    )
+
+
 def create_server(settings: Settings) -> Server:
     """Create and configure the Ansible MCP server.
 
@@ -94,39 +149,50 @@ def create_server(settings: Settings) -> Server:
     """
     server = Server("sre-copilot-ansible")
 
+    # Load tools from JSON config
+    ansible_tools = load_ansible_tools(settings.ansible_playbooks_dir)
+    tools_by_name = {tool.name: tool for tool in ansible_tools}
+
     @server.list_tools()
     async def list_tools() -> list[Tool]:
-        """List available tools."""
-        return [
-            Tool(
-                name="check_security_vulnerabilities",
-                description="Run security vulnerability check on target hosts. "
-                "This executes the security fix collector to identify vulnerabilities.",
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "target_hosts": {
-                            "type": "string",
-                            "description": "Target hosts or host group to check (e.g., 'webservers', 'all', 'host1.example.com')",
+        """List available tools - dynamically generated from ansible_tools.json."""
+        tools = []
+
+        # Add tools from JSON config
+        for tool_def in ansible_tools:
+            tools.append(
+                Tool(
+                    name=tool_def.name,
+                    description=tool_def.description,
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "target_hosts": {
+                                "type": "string",
+                                "description": "Target hosts or host group (e.g., 'all', 'webservers', 'host1.example.com')",
+                            },
+                            "check_mode": {
+                                "type": "boolean",
+                                "description": "Run in check mode (dry run) without making changes",
+                                "default": False,
+                            },
                         },
-                        "check_mode": {
-                            "type": "boolean",
-                            "description": "Run in check mode (dry run) without making changes",
-                            "default": False,
-                        },
+                        "required": ["target_hosts"],
                     },
-                    "required": ["target_hosts"],
-                },
-            ),
+                )
+            )
+
+        # Add generic utility tools
+        tools.extend([
             Tool(
                 name="run_playbook",
-                description="Run an Ansible playbook with specified variables",
+                description="Run any Ansible playbook with custom variables",
                 inputSchema={
                     "type": "object",
                     "properties": {
                         "playbook": {
                             "type": "string",
-                            "description": "Name of the playbook to run (e.g., 'check_security_vulnerabilities.yml')",
+                            "description": "Name of the playbook file (e.g., 'my_playbook.yml')",
                         },
                         "extra_vars": {
                             "type": "object",
@@ -144,111 +210,47 @@ def create_server(settings: Settings) -> Server:
             ),
             Tool(
                 name="list_playbooks",
-                description="List available Ansible playbooks",
+                description="List all available Ansible playbooks",
                 inputSchema={
                     "type": "object",
                     "properties": {},
                 },
             ),
-            Tool(
-                name="check_service_status",
-                description="Check the status of a service in OpenShift (STUB - not implemented)",
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "namespace": {
-                            "type": "string",
-                            "description": "The namespace/project name",
-                        },
-                        "service": {
-                            "type": "string",
-                            "description": "The service name",
-                        },
-                    },
-                    "required": ["namespace", "service"],
-                },
-            ),
-            Tool(
-                name="get_pod_logs",
-                description="Get logs from a pod (STUB - not implemented)",
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "namespace": {
-                            "type": "string",
-                            "description": "The namespace/project name",
-                        },
-                        "pod": {
-                            "type": "string",
-                            "description": "The pod name",
-                        },
-                        "lines": {
-                            "type": "integer",
-                            "description": "Number of log lines to retrieve",
-                            "default": 100,
-                        },
-                    },
-                    "required": ["namespace", "pod"],
-                },
-            ),
-            Tool(
-                name="describe_resource",
-                description="Describe a Kubernetes resource (STUB - not implemented)",
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "namespace": {
-                            "type": "string",
-                            "description": "The namespace/project name",
-                        },
-                        "resource_type": {
-                            "type": "string",
-                            "description": "The resource type (e.g., pod, deployment, service)",
-                        },
-                        "name": {
-                            "type": "string",
-                            "description": "The resource name",
-                        },
-                    },
-                    "required": ["namespace", "resource_type", "name"],
-                },
-            ),
-        ]
+        ])
+
+        return tools
 
     @server.call_tool()
     async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         """Handle tool calls."""
         logger.info("Tool called", tool=name, arguments=arguments)
 
-        if name == "check_security_vulnerabilities":
-            return _check_security_vulnerabilities(arguments, settings)
-        elif name == "run_playbook":
+        # Check if it's a registered ansible tool
+        if name in tools_by_name:
+            return _execute_ansible_tool(tools_by_name[name], arguments, settings)
+
+        # Handle built-in tools
+        if name == "run_playbook":
             return _run_playbook(arguments, settings)
         elif name == "list_playbooks":
             return _list_playbooks(settings)
-        elif name == "check_service_status":
-            return _stub_check_service_status(arguments)
-        elif name == "get_pod_logs":
-            return _stub_get_pod_logs(arguments)
-        elif name == "describe_resource":
-            return _stub_describe_resource(arguments)
         else:
             return [TextContent(type="text", text=f"Unknown tool: {name}")]
 
     return server
 
 
-def _check_security_vulnerabilities(
-    arguments: dict[str, Any], settings: Settings
+def _execute_ansible_tool(
+    tool_def: AnsibleToolDef, arguments: dict[str, Any], settings: Settings
 ) -> list[TextContent]:
-    """Check security vulnerabilities on target hosts."""
+    """Execute an ansible tool from the registry."""
     target_hosts = arguments.get("target_hosts")
     check_mode = arguments.get("check_mode", False)
 
     if not target_hosts:
         return [TextContent(type="text", text="Error: target_hosts is required")]
 
-    playbook_path = settings.ansible_playbooks_dir / "check_security_vulnerabilities.yml"
+    playbook_path = settings.ansible_playbooks_dir / tool_def.playbook
 
     if not playbook_path.exists():
         return [
@@ -264,8 +266,9 @@ def _check_security_vulnerabilities(
     success, stdout, stderr = run_playbook(playbook_path, extra_vars, settings, check_mode)
 
     if success:
-        response = f"""**Security Vulnerability Check - {mode_str}**
+        response = f"""**{tool_def.description}**
 
+Mode: {mode_str}
 Target Hosts: {target_hosts}
 Status: ✓ Completed successfully
 
@@ -274,8 +277,9 @@ Status: ✓ Completed successfully
 {stdout}
 ```"""
     else:
-        response = f"""**Security Vulnerability Check - {mode_str}**
+        response = f"""**{tool_def.description}**
 
+Mode: {mode_str}
 Target Hosts: {target_hosts}
 Status: ✗ Failed
 
@@ -348,19 +352,6 @@ Status: ✗ Failed
     return [TextContent(type="text", text=response)]
 
 
-def _get_available_playbooks(settings: Settings) -> list[str]:
-    """Get list of available playbooks."""
-    playbooks_dir = settings.ansible_playbooks_dir
-    if not playbooks_dir.exists():
-        return []
-
-    return sorted(
-        f.name for f in playbooks_dir.glob("*.yml") if f.is_file()
-    ) + sorted(
-        f.name for f in playbooks_dir.glob("*.yaml") if f.is_file()
-    )
-
-
 def _list_playbooks(settings: Settings) -> list[TextContent]:
     """List available Ansible playbooks."""
     playbooks = _get_available_playbooks(settings)
@@ -373,6 +364,10 @@ def _list_playbooks(settings: Settings) -> list[TextContent]:
             )
         ]
 
+    # Also load tool definitions to show which have tools
+    ansible_tools = load_ansible_tools(settings.ansible_playbooks_dir)
+    tool_playbooks = {t.playbook: t.name for t in ansible_tools}
+
     response = f"""**Available Playbooks**
 
 Directory: {settings.ansible_playbooks_dir}
@@ -380,71 +375,10 @@ Directory: {settings.ansible_playbooks_dir}
 Playbooks:
 """
     for playbook in playbooks:
-        response += f"  - {playbook}\n"
-
-    return [TextContent(type="text", text=response)]
-
-
-def _stub_check_service_status(arguments: dict[str, Any]) -> list[TextContent]:
-    """Stub implementation for check_service_status."""
-    namespace = arguments.get("namespace", "unknown")
-    service = arguments.get("service", "unknown")
-
-    response = f"""**STUB: check_service_status**
-
-This is a stub implementation. In production, this would:
-1. Connect to OpenShift cluster
-2. Check service: {service} in namespace: {namespace}
-3. Return endpoints, selectors, and pod status
-
-To implement:
-- Add kubernetes/openshift client
-- Query service and related resources
-- Aggregate health information"""
-
-    return [TextContent(type="text", text=response)]
-
-
-def _stub_get_pod_logs(arguments: dict[str, Any]) -> list[TextContent]:
-    """Stub implementation for get_pod_logs."""
-    namespace = arguments.get("namespace", "unknown")
-    pod = arguments.get("pod", "unknown")
-    lines = arguments.get("lines", 100)
-
-    response = f"""**STUB: get_pod_logs**
-
-This is a stub implementation. In production, this would:
-1. Connect to OpenShift cluster
-2. Get logs for pod: {pod} in namespace: {namespace}
-3. Return last {lines} lines
-
-To implement:
-- Add kubernetes client
-- Stream logs from pod
-- Handle multi-container pods
-- Support previous container logs"""
-
-    return [TextContent(type="text", text=response)]
-
-
-def _stub_describe_resource(arguments: dict[str, Any]) -> list[TextContent]:
-    """Stub implementation for describe_resource."""
-    namespace = arguments.get("namespace", "unknown")
-    resource_type = arguments.get("resource_type", "unknown")
-    name = arguments.get("name", "unknown")
-
-    response = f"""**STUB: describe_resource**
-
-This is a stub implementation. In production, this would:
-1. Connect to OpenShift cluster
-2. Describe {resource_type}/{name} in namespace: {namespace}
-3. Return detailed resource information
-
-To implement:
-- Add kubernetes client
-- Get resource with full details
-- Format output similar to kubectl describe
-- Include events and conditions"""
+        if playbook in tool_playbooks:
+            response += f"  - {playbook} (tool: {tool_playbooks[playbook]})\n"
+        else:
+            response += f"  - {playbook}\n"
 
     return [TextContent(type="text", text=response)]
 

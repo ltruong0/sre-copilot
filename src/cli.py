@@ -784,5 +784,53 @@ def ansible_check_security(ctx: click.Context, target_hosts: str, check: bool) -
             console.print(stdout)
 
 
+@ansible.command("host-info")
+@click.argument("target_hosts")
+@click.pass_context
+def ansible_host_info(ctx: click.Context, target_hosts: str) -> None:
+    """Get system information from target hosts (OS, CPU, RAM, disk).
+
+    Example: sre-copilot ansible host-info dev-truong.fringe.ibm.com
+    Example: sre-copilot ansible host-info all
+    """
+    settings = ctx.obj["settings"]
+
+    from src.mcp_servers.ansible_server import run_playbook
+
+    playbook_path = settings.ansible_playbooks_dir / "get_host_info.yml"
+
+    if not playbook_path.exists():
+        console.print(f"[red]Host info playbook not found at {playbook_path}[/red]")
+        return
+
+    extra_vars = {"target_hosts": target_hosts}
+
+    console.print("[bold]Get Host Information[/bold]")
+    console.print(f"[bold]Target hosts:[/bold] {target_hosts}")
+    console.print()
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+    ) as progress:
+        progress.add_task("Gathering host information...", total=None)
+        success, stdout, stderr = run_playbook(playbook_path, extra_vars, settings, False)
+
+    if success:
+        console.print("[green]✓ Host information gathered successfully[/green]\n")
+        if stdout:
+            console.print("[bold]Output:[/bold]")
+            console.print(stdout)
+    else:
+        console.print("[red]✗ Failed to get host information[/red]\n")
+        if stderr:
+            console.print("[bold]Error:[/bold]")
+            console.print(stderr)
+        if stdout:
+            console.print("\n[bold]Output:[/bold]")
+            console.print(stdout)
+
+
 if __name__ == "__main__":
     main()

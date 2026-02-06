@@ -1,0 +1,87 @@
+---
+- name: Get Host Information Playbook
+  hosts: "{{ target_hosts }}"
+  gather_facts: yes
+  become: true
+
+  tasks:
+    - name: Display system overview
+      debug:
+        msg: |
+          ==========================================
+          HOST INFORMATION REPORT
+          ==========================================
+          Hostname: {{ ansible_hostname }}
+          FQDN: {{ ansible_fqdn }}
+          ==========================================
+
+    - name: Display OS information
+      debug:
+        msg: |
+          --- Operating System ---
+          OS: {{ ansible_distribution }} {{ ansible_distribution_version }}
+          OS Family: {{ ansible_os_family }}
+          Kernel: {{ ansible_kernel }}
+          Architecture: {{ ansible_architecture }}
+
+    - name: Display CPU information
+      debug:
+        msg: |
+          --- CPU ---
+          Processor: {{ ansible_processor[2] | default(ansible_processor[0]) }}
+          CPU Cores: {{ ansible_processor_vcpus }}
+          Processor Count: {{ ansible_processor_count }}
+
+    - name: Display memory information
+      debug:
+        msg: |
+          --- Memory ---
+          Total RAM: {{ (ansible_memtotal_mb / 1024) | round(2) }} GB
+          Free RAM: {{ (ansible_memfree_mb / 1024) | round(2) }} GB
+          Used RAM: {{ ((ansible_memtotal_mb - ansible_memfree_mb) / 1024) | round(2) }} GB
+          Swap Total: {{ (ansible_swaptotal_mb / 1024) | round(2) }} GB
+          Swap Free: {{ (ansible_swapfree_mb / 1024) | round(2) }} GB
+
+    - name: Get disk usage
+      ansible.builtin.shell: df -h --output=source,size,used,avail,pcent,target -x tmpfs -x devtmpfs 2>/dev/null || df -h
+      register: disk_output
+      changed_when: false
+
+    - name: Display disk information
+      debug:
+        msg: |
+          --- Disk Usage ---
+          {{ disk_output.stdout }}
+
+    - name: Display network interfaces
+      debug:
+        msg: |
+          --- Primary Network ---
+          Default IPv4: {{ ansible_default_ipv4.address | default('N/A') }}
+          Interface: {{ ansible_default_ipv4.interface | default('N/A') }}
+          MAC Address: {{ ansible_default_ipv4.macaddress | default('N/A') }}
+          Gateway: {{ ansible_default_ipv4.gateway | default('N/A') }}
+
+    - name: Get system uptime
+      ansible.builtin.command: uptime -p
+      register: uptime_output
+      changed_when: false
+      failed_when: false
+
+    - name: Get load average
+      ansible.builtin.command: cat /proc/loadavg
+      register: loadavg_output
+      changed_when: false
+      failed_when: false
+
+    - name: Display uptime and load
+      debug:
+        msg: |
+          --- System Status ---
+          Uptime: {{ uptime_output.stdout | default('N/A') }}
+          Load Average: {{ loadavg_output.stdout | default('N/A') }}
+          Last Boot: {{ ansible_date_time.date }} {{ ansible_date_time.time }}
+
+    - name: Completion message
+      debug:
+        msg: "✓ Host information gathered for {{ inventory_hostname }}"

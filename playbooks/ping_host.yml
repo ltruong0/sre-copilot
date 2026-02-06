@@ -1,0 +1,22 @@
+---
+- name: Ping Host Playbook
+  hosts: "{{ target_hosts }}"
+  gather_facts: no
+
+  tasks:
+    - name: Display ping information
+      debug:
+        msg: |
+          ====================================
+          HOST REACHABILITY CHECK
+          ====================================
+          Checking connectivity to: {{ target_hosts }}
+          ====================================
+
+    - name: Ping the host
+      ansible.builtin.ping:
+      register: ping_result
+
+    - name: Display ping result
+      debug:
+        msg: "✓ Host {{ inventory_hostname }} is reachable (ping: {{ ping_result.ping }})"

@@ -6,7 +6,9 @@ RAG-based documentation assistant with MCP servers for SRE teams. Ingests intern
 
 - **Document Ingestion**: Parse and chunk markdown documentation with semantic splitting
 - **RAG Queries**: Answer questions using retrieved context from your docs
-- **MCP Server**: Integrate with Claude Desktop or other MCP clients
+- **Ansible Integration**: Execute playbooks via natural language or CLI commands
+- **Agentic CLI**: Intelligent routing between documentation queries and ansible actions
+- **MCP Servers**: Integrate with Claude Desktop or other MCP clients (RAG + Ansible)
 - **Swappable Providers**: Ollama (local) or IBM watsonx.ai (cloud)
 
 ## Installation
@@ -52,6 +54,12 @@ OLLAMA_CA_CERT=./rootCA.pem
 # Paths
 DOCS_PATH=./docs
 CHROMADB_PATH=./data/chromadb
+
+# Ansible Configuration
+ANSIBLE_PLAYBOOK_CMD=/path/to/venv/bin/ansible-playbook
+ANSIBLE_PLAYBOOKS_DIR=./playbooks
+ANSIBLE_INVENTORY=./inventory
+ANSIBLE_TIMEOUT=300
 ```
 
 ### SSL Certificates (for self-signed certs)
@@ -173,7 +181,7 @@ The standardizer will:
 
 ### Query Documentation
 
-Ask questions about your docs:
+Ask questions about your docs (RAG only):
 
 ```bash
 sre-copilot query "How do I troubleshoot a pod in CrashLoopBackOff?"
@@ -185,12 +193,81 @@ Retrieve more context:
 sre-copilot query "What is the incident response process?" --top-k 10
 ```
 
+### Agentic Queries (Ask)
+
+Use natural language to query docs OR execute ansible playbooks:
+
+```bash
+# The agent decides whether to search docs or run ansible
+sre-copilot ask "What vulnerabilities are on server1.example.com"
+sre-copilot ask "Get system info for all hosts"
+sre-copilot ask "How do I troubleshoot CrashLoopBackOff"  # Uses RAG
+
+# Preview what would happen without executing
+sre-copilot ask "Check security on prod-servers" --dry-run
+```
+
+### Ansible Commands
+
+Direct CLI access to ansible playbooks:
+
+```bash
+# List available playbooks
+sre-copilot ansible list
+
+# Run security vulnerability check
+sre-copilot ansible check-security dev-server.example.com
+sre-copilot ansible check-security all --check  # Dry run
+
+# Get host information (OS, CPU, RAM, disk)
+sre-copilot ansible host-info dev-server.example.com
+
+# Run any playbook with custom variables
+sre-copilot ansible run my_playbook.yml -e target_hosts=webservers -e some_var=value
+```
+
+### Adding New Ansible Tools
+
+Tools are defined in `playbooks/ansible_tools.json`:
+
+```json
+{
+  "tools": [
+    {
+      "name": "check_security",
+      "playbook": "check_security_vulnerabilities.yml",
+      "description": "Run security vulnerability scan on hosts",
+      "keywords": ["security", "vulnerability", "cve", "scan"]
+    },
+    {
+      "name": "get_host_info",
+      "playbook": "get_host_info.yml",
+      "description": "Get system info including OS, CPU, RAM, disk",
+      "keywords": ["info", "system", "cpu", "ram", "disk", "memory"]
+    }
+  ]
+}
+```
+
+To add a new tool:
+1. Create the playbook in `playbooks/`
+2. Add an entry to `playbooks/ansible_tools.json`
+3. The tool is automatically available in CLI and MCP server
+
 ### Start MCP Server
 
 Run the MCP server for integration with Claude Desktop:
 
 ```bash
-sre-copilot serve
+# RAG server (documentation queries)
+sre-copilot serve --server rag
+
+# Ansible server (playbook execution)
+sre-copilot serve --server ansible
+
+# Or run directly
+python -m src.mcp_servers.rag_server
+python -m src.mcp_servers.ansible_server
 ```
 
 ### Debug Mode
@@ -209,9 +286,13 @@ Add to your Claude Desktop config (`~/.config/claude/claude_desktop_config.json`
 ```json
 {
   "mcpServers": {
-    "sre-copilot": {
+    "sre-rag": {
       "command": "/path/to/sre-copilot/.venv/bin/sre-copilot",
-      "args": ["serve"]
+      "args": ["serve", "--server", "rag"]
+    },
+    "sre-ansible": {
+      "command": "/path/to/sre-copilot/.venv/bin/sre-copilot",
+      "args": ["serve", "--server", "ansible"]
     }
   }
 }
@@ -219,11 +300,22 @@ Add to your Claude Desktop config (`~/.config/claude/claude_desktop_config.json`
 
 ### Available MCP Tools
 
+**RAG Server:**
+
 | Tool | Description |
 |------|-------------|
 | `query_docs` | Query documentation with a question |
 | `list_sources` | List all available documentation sources |
 | `reingest` | Trigger re-ingestion of documentation |
+
+**Ansible Server** (tools loaded from `ansible_tools.json`):
+
+| Tool | Description |
+|------|-------------|
+| `check_security` | Run security vulnerability scan on hosts |
+| `get_host_info` | Get system information (OS, CPU, RAM, disk) |
+| `run_playbook` | Run any playbook with custom variables |
+| `list_playbooks` | List all available playbooks |
 
 ## Development
 
@@ -244,8 +336,9 @@ pytest tests/ -v --cov=src --cov-report=term-missing
 ```
 sre-copilot/
 ├── src/
-│   ├── cli.py              # CLI commands
+│   ├── cli.py              # CLI commands (query, ask, ansible, serve, etc.)
 │   ├── config.py           # Settings and provider factory
+│   ├── agent.py            # Agentic orchestrator (routes to RAG or Ansible)
 │   ├── providers/          # LLM/embedding providers
 │   │   ├── base.py         # Abstract interfaces
 │   │   ├── ollama_provider.py
@@ -260,7 +353,12 @@ sre-copilot/
 │   │   └── generator.py    # Answer generation
 │   └── mcp_servers/        # MCP protocol servers
 │       ├── rag_server.py   # Documentation queries
-│       └── ansible_server.py # Operations (stub)
+│       └── ansible_server.py # Ansible playbook execution
+├── playbooks/              # Ansible playbooks
+│   ├── ansible_tools.json  # Tool definitions (name, playbook, keywords)
+│   ├── check_security_vulnerabilities.yml
+│   └── get_host_info.yml
+├── inventory               # Ansible inventory file
 ├── tests/
 ├── docs/                   # Your documentation
 ├── data/                   # ChromaDB storage
