@@ -257,10 +257,70 @@ async def _ingest(settings, full: bool = False, llm_cleanup: bool = False) -> No
 @click.option("--path", type=str, default=None, help="Filter results by document path prefix (e.g., 'sre/netbox-enterprise/')")
 @click.pass_context
 def query(ctx: click.Context, question: str, top_k: int | None, path: str | None) -> None:
-    """Query the documentation."""
+    """Query the documentation (RAG only, no tool execution)."""
     settings = ctx.obj["settings"]
-    top_k = top_k if top_k is not None else settings.rag_top_k
-    asyncio.run(_query(settings, question, top_k, path))
+    top_k_val = top_k if top_k is not None else settings.rag_top_k
+    asyncio.run(_query(settings, question, top_k_val, path))
+
+
+@main.command()
+@click.argument("question")
+@click.option("--dry-run", is_flag=True, help="Show what would be done without executing")
+@click.pass_context
+def ask(ctx: click.Context, question: str, dry_run: bool) -> None:
+    """Ask a question - can query docs OR execute ansible playbooks.
+
+    Examples:
+        sre-copilot ask "What vulnerabilities are on dev-truong.fringe.ibm.com"
+        sre-copilot ask "Check security on all hosts"
+        sre-copilot ask "How do I troubleshoot a CrashLoopBackOff"
+    """
+    settings = ctx.obj["settings"]
+    asyncio.run(_ask(settings, question, auto_execute=not dry_run))
+
+
+async def _ask(settings, question: str, auto_execute: bool) -> None:  # noqa: ANN001
+    """Run an agentic query that can execute tools."""
+    from src.agent import SREAgent
+    from src.rag.retriever import DocumentRetriever
+
+    embedding_provider = get_embedding_provider(settings)
+    llm_provider = get_llm_provider(settings)
+
+    retriever = DocumentRetriever(
+        embedding_provider=embedding_provider,
+        chromadb_path=settings.chromadb_path,
+        top_k=settings.rag_top_k,
+        similarity_threshold=settings.rag_similarity_threshold,
+    )
+
+    agent = SREAgent(
+        llm_provider=llm_provider,
+        retriever=retriever,
+        settings=settings,
+    )
+
+    mode_str = "EXECUTE MODE" if auto_execute else "DRY RUN"
+    console.print(f"[dim]Mode: {mode_str}[/dim]\n")
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+    ) as progress:
+        progress.add_task("Processing request...", total=None)
+        result = await agent.query(question, auto_execute=auto_execute)
+
+    if result.tool_used:
+        console.print(f"[bold]Tool used:[/bold] {result.tool_used}")
+
+    console.print("\n[bold]Answer:[/bold]")
+    console.print(result.answer)
+
+    if result.rag_result and result.rag_result.sources:
+        console.print("\n[bold]Sources:[/bold]")
+        for source in result.rag_result.sources:
+            console.print(f"  - {source.document_path} ({source.breadcrumb})")
 
 
 async def _query(settings, question: str, top_k: int, path_filter: str | None) -> None:  # noqa: ANN001
@@ -303,17 +363,26 @@ async def _query(settings, question: str, top_k: int, path_filter: str | None) -
 @main.command()
 @click.option("--host", default=None, help="Server host")
 @click.option("--port", type=int, default=None, help="Server port")
+@click.option(
+    "--server",
+    type=click.Choice(["rag", "ansible"]),
+    default="rag",
+    help="Which MCP server to run (rag or ansible)",
+)
 @click.pass_context
-def serve(ctx: click.Context, host: str | None, port: int | None) -> None:
+def serve(ctx: click.Context, host: str | None, port: int | None, server: str) -> None:
     """Start the MCP server."""
     settings = ctx.obj["settings"]
 
     server_host = host or settings.mcp_server_host
     server_port = port or settings.mcp_server_port
 
-    console.print(f"[bold]Starting MCP server on {server_host}:{server_port}[/bold]")
-
-    from src.mcp_servers.rag_server import run_server
+    if server == "ansible":
+        console.print("[bold]Starting Ansible MCP server[/bold]")
+        from src.mcp_servers.ansible_server import run_server
+    else:
+        console.print(f"[bold]Starting RAG MCP server on {server_host}:{server_port}[/bold]")
+        from src.mcp_servers.rag_server import run_server
 
     asyncio.run(run_server(settings))
 
@@ -570,6 +639,149 @@ def show_templates(ctx: click.Context) -> None:
 
     guide = get_template_guide()
     console.print(guide)
+
+
+# Ansible command group
+@main.group()
+@click.pass_context
+def ansible(ctx: click.Context) -> None:
+    """Ansible playbook operations."""
+    pass
+
+
+@ansible.command("list")
+@click.pass_context
+def ansible_list(ctx: click.Context) -> None:
+    """List available Ansible playbooks."""
+    settings = ctx.obj["settings"]
+
+    from src.mcp_servers.ansible_server import _get_available_playbooks
+
+    playbooks = _get_available_playbooks(settings)
+
+    if not playbooks:
+        console.print(f"[yellow]No playbooks found in {settings.ansible_playbooks_dir}[/yellow]")
+        return
+
+    console.print(f"[bold]Available Playbooks[/bold] ({settings.ansible_playbooks_dir})\n")
+    for playbook in playbooks:
+        console.print(f"  - {playbook}")
+
+
+@ansible.command("run")
+@click.argument("playbook")
+@click.option("--extra-vars", "-e", multiple=True, help="Extra variables (key=value)")
+@click.option("--check", is_flag=True, help="Run in check mode (dry run)")
+@click.pass_context
+def ansible_run(ctx: click.Context, playbook: str, extra_vars: tuple, check: bool) -> None:
+    """Run an Ansible playbook.
+
+    Example: sre-copilot ansible run check_security_vulnerabilities.yml -e target_hosts=all
+    """
+    settings = ctx.obj["settings"]
+
+    from src.mcp_servers.ansible_server import _get_available_playbooks, run_playbook
+
+    # Validate playbook exists
+    playbook_path = settings.ansible_playbooks_dir / playbook
+    if not playbook_path.exists():
+        available = _get_available_playbooks(settings)
+        console.print(f"[red]Playbook '{playbook}' not found[/red]")
+        if available:
+            console.print("\n[bold]Available playbooks:[/bold]")
+            for p in available:
+                console.print(f"  - {p}")
+        return
+
+    # Parse extra vars
+    parsed_vars = {}
+    for var in extra_vars:
+        if "=" in var:
+            key, value = var.split("=", 1)
+            parsed_vars[key] = value
+        else:
+            console.print(f"[red]Invalid extra var format: {var}. Use key=value[/red]")
+            return
+
+    mode_str = "CHECK MODE (dry run)" if check else "EXECUTE MODE"
+    console.print(f"[bold]Running playbook:[/bold] {playbook}")
+    console.print(f"[bold]Mode:[/bold] {mode_str}")
+    if parsed_vars:
+        console.print(f"[bold]Extra vars:[/bold] {parsed_vars}")
+    console.print()
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+    ) as progress:
+        progress.add_task("Running playbook...", total=None)
+        success, stdout, stderr = run_playbook(playbook_path, parsed_vars, settings, check)
+
+    if success:
+        console.print("[green]✓ Playbook completed successfully[/green]\n")
+        if stdout:
+            console.print("[bold]Output:[/bold]")
+            console.print(stdout)
+    else:
+        console.print("[red]✗ Playbook failed[/red]\n")
+        if stderr:
+            console.print("[bold]Error:[/bold]")
+            console.print(stderr)
+        if stdout:
+            console.print("\n[bold]Output:[/bold]")
+            console.print(stdout)
+
+
+@ansible.command("check-security")
+@click.argument("target_hosts")
+@click.option("--check", is_flag=True, help="Run in check mode (dry run)")
+@click.pass_context
+def ansible_check_security(ctx: click.Context, target_hosts: str, check: bool) -> None:
+    """Run security vulnerability check on target hosts.
+
+    Example: sre-copilot ansible check-security all
+    Example: sre-copilot ansible check-security webservers --check
+    """
+    settings = ctx.obj["settings"]
+
+    from src.mcp_servers.ansible_server import run_playbook
+
+    playbook_path = settings.ansible_playbooks_dir / "check_security_vulnerabilities.yml"
+
+    if not playbook_path.exists():
+        console.print(f"[red]Security check playbook not found at {playbook_path}[/red]")
+        return
+
+    extra_vars = {"target_hosts": target_hosts}
+    mode_str = "CHECK MODE (dry run)" if check else "EXECUTE MODE"
+
+    console.print("[bold]Security Vulnerability Check[/bold]")
+    console.print(f"[bold]Target hosts:[/bold] {target_hosts}")
+    console.print(f"[bold]Mode:[/bold] {mode_str}")
+    console.print()
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+    ) as progress:
+        progress.add_task("Running security check...", total=None)
+        success, stdout, stderr = run_playbook(playbook_path, extra_vars, settings, check)
+
+    if success:
+        console.print("[green]✓ Security check completed successfully[/green]\n")
+        if stdout:
+            console.print("[bold]Output:[/bold]")
+            console.print(stdout)
+    else:
+        console.print("[red]✗ Security check failed[/red]\n")
+        if stderr:
+            console.print("[bold]Error:[/bold]")
+            console.print(stderr)
+        if stdout:
+            console.print("\n[bold]Output:[/bold]")
+            console.print(stdout)
 
 
 if __name__ == "__main__":

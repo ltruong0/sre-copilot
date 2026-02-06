@@ -1,0 +1,12 @@
+# Ansible Inventory File
+# This is a placeholder inventory for testing runbooks
+
+[all]
+dev-truong.fringe.ibm.com ansible_ssh_host=9.207.131.32 ansible_ssh_user=fringe
+
+[local]
+localhost ansible_connection=local
+
+[all:vars]
+ansible_python_interpreter=/usr/bin/python3
+ansible_ssh_private_key_file=~/Desktop/projects/fringe_ssh_pubkey/id_rsa

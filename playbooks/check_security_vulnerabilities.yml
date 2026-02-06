@@ -1,0 +1,31 @@
+---
+- name: Check Security Vulnerabilities Playbook
+  hosts: "{{ target_hosts }}"
+  gather_facts: no
+  become: true
+
+  tasks:
+    - name: Display check information
+      debug:
+        msg: |
+          ====================================
+          SECURITY VULNERABILITY CHECK PLAYBOOK
+          ====================================
+          Target Hosts: {{ target_hosts }}
+          ====================================
+          Running security fix collector to check for vulnerabilities.
+          ====================================
+
+    - name: Run security vulnerability collector
+      ansible.builtin.command:
+        cmd: /usr/local/lssecfixes/sbin/collector_secfix.py -l -p -s -x
+      register: secfix_output
+      changed_when: false
+
+    - name: Display security vulnerability report
+      debug:
+        msg: "{{ secfix_output.stdout }}"
+
+    - name: Completion message
+      debug:
+        msg: "✓ Security vulnerability check completed on {{ inventory_hostname }}"

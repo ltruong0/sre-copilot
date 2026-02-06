@@ -145,6 +145,24 @@ class Settings(BaseSettings):
         description="Enable LLM-based cleanup of badly formatted sections",
     )
 
+    # Ansible settings
+    ansible_playbook_cmd: str = Field(
+        default="ansible-playbook",
+        description="Path to ansible-playbook executable",
+    )
+    ansible_playbooks_dir: Path = Field(
+        default=Path("./playbooks"),
+        description="Directory containing Ansible playbooks",
+    )
+    ansible_inventory: Path | None = Field(
+        default=None,
+        description="Path to Ansible inventory file",
+    )
+    ansible_timeout: int = Field(
+        default=300,
+        description="Timeout in seconds for Ansible playbook execution",
+    )
+
 
 @lru_cache
 def get_settings() -> Settings:
