@@ -69,22 +69,23 @@ class AgentResult:
 class SREAgent:
     """Agent that consults documentation and can execute diagnostic tools."""
 
-    SYSTEM_PROMPT = """You are an SRE assistant agent with access to a knowledge base and diagnostic tools.
+    SYSTEM_PROMPT = """You are an SRE assistant. Answer the user's question directly and concisely.
 
-KNOWLEDGE BASE:
+CONTEXT (use only if relevant to the question):
 {context}
 
-AVAILABLE TOOLS:
+AVAILABLE DIAGNOSTIC TOOLS:
 {tools}
 
-USER QUERY: {question}
+USER QUESTION: {question}
 TARGET HOST: {target_host}
 
 INSTRUCTIONS:
-- Answer questions directly from your knowledge base
-- For informational questions (what is X, how does Y work, tell me about Z), just answer - do NOT mention tools
-- ONLY suggest tools when the user has an actual problem to diagnose AND mentions a specific host
-- If suggesting tools, add this JSON block at the very end:
+- Be concise. Answer in 2-4 sentences unless more detail is needed.
+- IGNORE context that is not relevant to the user's question.
+- For informational questions, just answer - do NOT mention tools.
+- ONLY suggest tools when the user has a problem to diagnose AND mentions a host.
+- If suggesting tools, add this JSON at the very end:
 ```json
 {{"suggested_tools": [{{"tool": "name", "target": "host", "reason": "why"}}]}}
 ```"""
@@ -352,16 +353,16 @@ Output:"""
                     max_tokens=500,
                     temperature=0.3,
                 )
-                answer = f"**{tool_name}** on `{target_host}`\n\n{result.text.strip()}"
+                answer = result.text.strip()
             except Exception as e:
                 logger.warning("Failed to summarize, showing raw output", error=str(e))
-                answer = f"**{tool_name}** on {target_host}: {status}\n\n```\n{output}\n```"
+                answer = f"{status}\n\n```\n{output}\n```"
         else:
             # Show raw output (debug mode)
             if success:
-                answer = f"**{tool.description}**\n\nTarget: {target_host}\nStatus: ✓ Success\n\n**Output:**\n```\n{stdout}\n```"
+                answer = f"Status: ✓ Success\n\n**Output:**\n```\n{stdout}\n```"
             else:
-                answer = f"**{tool.description}**\n\nTarget: {target_host}\nStatus: ✗ Failed\n\n**Error:**\n```\n{stderr}\n```\n\n**Output:**\n```\n{stdout}\n```"
+                answer = f"Status: ✗ Failed\n\n**Error:**\n```\n{stderr}\n```\n\n**Output:**\n```\n{stdout}\n```"
 
         return AgentResult(
             answer=answer,

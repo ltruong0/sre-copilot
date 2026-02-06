@@ -156,6 +156,15 @@ class DocumentRetriever:
         metadatas = results.get("metadatas", [[]])[0]
         distances = results.get("distances", [[]])[0]
 
+        # Log all retrieved chunks with scores for debugging
+        logger.debug(
+            "Retrieved chunks",
+            query=query[:50],
+            total_results=len(ids),
+            threshold=self._similarity_threshold,
+        )
+
+        above_threshold = 0
         for i, chunk_id in enumerate(ids):
             chunk = RetrievedChunk.from_chroma_result(
                 id=chunk_id,
@@ -164,9 +173,19 @@ class DocumentRetriever:
                 distance=distances[i],
             )
 
+            # Log each chunk's score
+            logger.debug(
+                "Chunk score",
+                score=f"{chunk.similarity_score:.3f}",
+                path=chunk.document_path,
+                breadcrumb=chunk.breadcrumb[:50] if chunk.breadcrumb else "",
+            )
+
             # Apply similarity threshold
             if chunk.similarity_score < self._similarity_threshold:
                 continue
+
+            above_threshold += 1
 
             # Apply path filter
             if path_filter and path_filter not in chunk.document_path:
@@ -179,10 +198,9 @@ class DocumentRetriever:
                 break
 
         logger.debug(
-            "Retrieved chunks",
-            query=query[:50],
-            total_results=len(ids),
-            above_threshold=len(chunks),
+            "Retrieval complete",
+            returned=len(chunks),
+            above_threshold=above_threshold,
         )
 
         return chunks

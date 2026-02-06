@@ -6,8 +6,10 @@ RAG-based documentation assistant with MCP servers for SRE teams. Ingests intern
 
 - **Document Ingestion**: Parse and chunk markdown documentation with semantic splitting
 - **RAG Queries**: Answer questions using retrieved context from your docs
+- **Interactive Chat**: Conversational interface with memory (remembers target hosts)
 - **Ansible Integration**: Execute playbooks via natural language or CLI commands
-- **Agentic CLI**: Intelligent routing between documentation queries and ansible actions
+- **Smart Tool Selection**: LLM-based understanding of user intent (no keyword matching)
+- **Summarized Output**: Tool results formatted in readable tables
 - **MCP Servers**: Integrate with Claude Desktop or other MCP clients (RAG + Ansible)
 - **Swappable Providers**: Ollama (local) or IBM watsonx.ai (cloud)
 
@@ -54,6 +56,13 @@ OLLAMA_CA_CERT=./rootCA.pem
 # Paths
 DOCS_PATH=./docs
 CHROMADB_PATH=./data/chromadb
+
+# RAG Configuration
+RAG_TOP_K=10                    # Number of chunks to retrieve
+RAG_SIMILARITY_THRESHOLD=0.3   # Minimum similarity score
+
+# Logging
+LOG_LEVEL=WARNING              # DEBUG, INFO, WARNING, ERROR
 
 # Ansible Configuration
 ANSIBLE_PLAYBOOK_CMD=/path/to/venv/bin/ansible-playbook
@@ -193,19 +202,48 @@ Retrieve more context:
 sre-copilot query "What is the incident response process?" --top-k 10
 ```
 
-### Agentic Queries (Ask)
+### Interactive Chat (Ask)
 
-Use natural language to query docs OR execute ansible playbooks:
+Start an interactive chat session with conversation memory:
 
 ```bash
-# The agent decides whether to search docs or run ansible
-sre-copilot ask "What vulnerabilities are on server1.example.com"
-sre-copilot ask "Get system info for all hosts"
-sre-copilot ask "How do I troubleshoot CrashLoopBackOff"  # Uses RAG
-
-# Preview what would happen without executing
-sre-copilot ask "Check security on prod-servers" --dry-run
+sre-copilot ask
 ```
+
+Example conversation:
+```
+You: My app on dev-server.example.com isn't working
+
+Agent: Based on the troubleshooting guide, let's diagnose this systematically...
+
+I can run these diagnostics for you:
+- ping host: Check network connectivity
+- get host info: Check system resources
+
+Just say 'yes' to run all, or mention which ones you want.
+
+You: yes
+[Runs diagnostics on dev-server.example.com]
+
+You: can you check security too?
+[Remembers the host, runs security scan on dev-server.example.com]
+```
+
+Single query mode:
+
+```bash
+# Ask a question directly
+sre-copilot ask "What is NetBox Enterprise?"
+
+# Auto-execute suggested tools
+sre-copilot ask "Check dev-server.example.com" --execute
+```
+
+The agent:
+- Answers knowledge questions directly from documentation
+- Only suggests tools when there's an actual problem AND a target host
+- Remembers the target host across the conversation
+- Summarizes tool output in table format
 
 ### Ansible Commands
 
@@ -214,6 +252,9 @@ Direct CLI access to ansible playbooks:
 ```bash
 # List available playbooks
 sre-copilot ansible list
+
+# Ping host (ICMP ping + nmap port scan + SSH check)
+sre-copilot ansible ping dev-server.example.com
 
 # Run security vulnerability check
 sre-copilot ansible check-security dev-server.example.com
@@ -226,6 +267,11 @@ sre-copilot ansible host-info dev-server.example.com
 sre-copilot ansible run my_playbook.yml -e target_hosts=webservers -e some_var=value
 ```
 
+The `ping` command runs from localhost and checks:
+- ICMP reachability
+- Top 20 ports via nmap (requires `nmap` installed)
+- SSH connectivity via Ansible
+
 ### Adding New Ansible Tools
 
 Tools are defined in `playbooks/ansible_tools.json`:
@@ -234,16 +280,19 @@ Tools are defined in `playbooks/ansible_tools.json`:
 {
   "tools": [
     {
-      "name": "check_security",
-      "playbook": "check_security_vulnerabilities.yml",
-      "description": "Run security vulnerability scan on hosts",
-      "keywords": ["security", "vulnerability", "cve", "scan"]
+      "name": "ping_host",
+      "playbook": "ping_host.yml",
+      "description": "Check host reachability, open ports, and SSH connectivity"
     },
     {
       "name": "get_host_info",
       "playbook": "get_host_info.yml",
-      "description": "Get system info including OS, CPU, RAM, disk",
-      "keywords": ["info", "system", "cpu", "ram", "disk", "memory"]
+      "description": "Get system info including OS, CPU, RAM, disk"
+    },
+    {
+      "name": "check_security",
+      "playbook": "check_security_vulnerabilities.yml",
+      "description": "Run security vulnerability scan on hosts"
     }
   ]
 }
@@ -312,8 +361,9 @@ Add to your Claude Desktop config (`~/.config/claude/claude_desktop_config.json`
 
 | Tool | Description |
 |------|-------------|
-| `check_security` | Run security vulnerability scan on hosts |
+| `ping_host` | Check reachability, port scan, and SSH connectivity |
 | `get_host_info` | Get system information (OS, CPU, RAM, disk) |
+| `check_security` | Run security vulnerability scan on hosts |
 | `run_playbook` | Run any playbook with custom variables |
 | `list_playbooks` | List all available playbooks |
 
@@ -355,9 +405,10 @@ sre-copilot/
 │       ├── rag_server.py   # Documentation queries
 │       └── ansible_server.py # Ansible playbook execution
 ├── playbooks/              # Ansible playbooks
-│   ├── ansible_tools.json  # Tool definitions (name, playbook, keywords)
-│   ├── check_security_vulnerabilities.yml
-│   └── get_host_info.yml
+│   ├── ansible_tools.json  # Tool definitions (name, playbook, description)
+│   ├── ping_host.yml       # ICMP ping, nmap scan, SSH check
+│   ├── get_host_info.yml   # System information
+│   └── check_security_vulnerabilities.yml
 ├── inventory               # Ansible inventory file
 ├── tests/
 ├── docs/                   # Your documentation

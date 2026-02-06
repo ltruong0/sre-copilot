@@ -239,12 +239,15 @@ async def _ingest(settings, full: bool = False, llm_cleanup: bool = False) -> No
             chunks_to_embed.extend(chunks)
             progress.advance(task)
 
-        # Remove orphaned documents
-        current_paths = {doc.relative_path for doc in documents}
-        orphaned = set(existing_hashes.keys()) - current_paths
-        for path in orphaned:
-            embedder.delete_document_chunks(path)
-            console.print(f"[yellow]Removed orphaned document:[/yellow] {path}")
+        # Remove orphaned documents only if doing a full re-ingest
+        # (prevents accidentally deleting docs when ingesting from a different path)
+        orphaned = set()
+        if full:
+            current_paths = {doc.relative_path for doc in documents}
+            orphaned = set(existing_hashes.keys()) - current_paths
+            for path in orphaned:
+                embedder.delete_document_chunks(path)
+                console.print(f"[yellow]Removed orphaned document:[/yellow] {path}")
 
         # Embed chunks
         if chunks_to_embed:
@@ -330,10 +333,58 @@ async def _ask_single(settings, question: str, auto_execute: bool) -> None:  # n
     console.print(result.answer)
 
 
+def _render_user_message(text: str) -> None:
+    """Render a user message as a right-aligned panel."""
+    from rich.align import Align
+    from rich.panel import Panel
+
+    # Calculate width based on text length, with min/max bounds
+    width = min(max(len(text) + 6, 30), 70)
+    panel = Panel(
+        text,
+        title="You",
+        title_align="right",
+        border_style="blue",
+        width=width,
+    )
+    console.print(Align.right(panel))
+
+
+def _render_agent_message(text: str) -> None:
+    """Render an agent message as a left-aligned panel."""
+    from rich.markdown import Markdown
+    from rich.panel import Panel
+
+    panel = Panel(
+        Markdown(text),
+        title="Agent",
+        title_align="left",
+        border_style="green",
+        width=min(console.width - 10, 80),
+    )
+    console.print(panel)
+
+
+def _render_tool_output(tool_name: str, target: str, text: str) -> None:
+    """Render tool output as a styled panel."""
+    from rich.markdown import Markdown
+    from rich.panel import Panel
+
+    panel = Panel(
+        Markdown(text),
+        title=f"{tool_name} → {target}",
+        title_align="left",
+        border_style="cyan",
+        width=min(console.width - 10, 80),
+    )
+    console.print(panel)
+
+
 async def _ask_interactive(settings, debug: bool = False) -> None:  # noqa: ANN001
     """Run an interactive chat session with the agent."""
     from prompt_toolkit import PromptSession
     from prompt_toolkit.history import InMemoryHistory
+    from rich.panel import Panel
 
     from src.agent import SREAgent
     from src.rag.retriever import DocumentRetriever
@@ -357,10 +408,17 @@ async def _ask_interactive(settings, debug: bool = False) -> None:  # noqa: ANN0
     # Summarize output unless debug mode is on
     summarize_output = not debug
 
-    console.print("[bold]SRE Copilot Interactive Mode[/bold]")
-    console.print("Type your questions or commands. Type 'exit' or 'quit' to leave.\n")
-    console.print("[dim]Tip: After suggestions, say 'yes' to run all tools,[/dim]")
-    console.print("[dim]     or mention a tool like 'ping it' or 'check security'.[/dim]\n")
+    # Welcome banner
+    console.print(Panel(
+        "[bold]SRE Copilot[/bold]\n\n"
+        "Ask questions about your documentation or diagnose host issues.\n"
+        "Type [cyan]exit[/cyan] or [cyan]quit[/cyan] to leave.\n\n"
+        "[dim]Tip: After suggestions, say 'yes' to run all tools,\n"
+        "or mention a tool like 'ping it' or 'check security'.[/dim]",
+        border_style="bright_black",
+        width=min(console.width - 10, 70),
+    ))
+    console.print()
 
     session: PromptSession = PromptSession(history=InMemoryHistory())
     last_suggestions: list[dict[str, str]] | None = None
@@ -369,7 +427,7 @@ async def _ask_interactive(settings, debug: bool = False) -> None:  # noqa: ANN0
     while True:
         try:
             user_input = await asyncio.get_event_loop().run_in_executor(
-                None, lambda: session.prompt("You: ")
+                None, lambda: session.prompt("› ")
             )
         except (EOFError, KeyboardInterrupt):
             console.print("\n[dim]Goodbye![/dim]")
@@ -383,6 +441,10 @@ async def _ask_interactive(settings, debug: bool = False) -> None:  # noqa: ANN0
             console.print("[dim]Goodbye![/dim]")
             break
 
+        # Show user message
+        _render_user_message(user_input)
+        console.print()
+
         # If we have previous suggestions, use LLM to understand what the user wants
         if last_suggestions:
             with Progress(
@@ -394,7 +456,6 @@ async def _ask_interactive(settings, debug: bool = False) -> None:  # noqa: ANN0
                 tools_to_run = await agent.parse_tool_request(user_input, last_suggestions)
 
             if tools_to_run:
-                console.print()
                 for tool_name in tools_to_run:
                     # Get target from the suggestion for this tool
                     target = "all"
@@ -410,13 +471,12 @@ async def _ask_interactive(settings, debug: bool = False) -> None:  # noqa: ANN0
                     ) as progress:
                         progress.add_task(f"Running {tool_name}...", total=None)
                         result = await agent.execute_tool(tool_name, target, summarize=summarize_output)
-                    console.print(result.answer)
+                    _render_tool_output(tool_name, target, result.answer)
                     console.print()
                 last_suggestions = None
                 continue
 
         # Regular query
-        console.print()
         with Progress(
             SpinnerColumn(),
             TextColumn("[progress.description]{task.description}"),
@@ -425,7 +485,8 @@ async def _ask_interactive(settings, debug: bool = False) -> None:  # noqa: ANN0
             progress.add_task("Thinking...", total=None)
             result = await agent.query(user_input, auto_execute=False, context_host=context_host)
 
-        console.print(f"[bold]Agent:[/bold] {result.answer}\n")
+        _render_agent_message(result.answer)
+        console.print()
 
         # Store suggestions and context for follow-up
         last_suggestions = result.suggested_tools
