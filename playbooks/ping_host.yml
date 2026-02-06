@@ -1,7 +1,8 @@
 ---
 - name: Ping Host Playbook
-  hosts: "{{ target_hosts }}"
+  hosts: localhost
   gather_facts: no
+  connection: local
 
   tasks:
     - name: Display ping information
@@ -10,13 +11,46 @@
           ====================================
           HOST REACHABILITY CHECK
           ====================================
-          Checking connectivity to: {{ target_hosts }}
+          Target: {{ target_hosts }}
           ====================================
 
-    - name: Ping the host
-      ansible.builtin.ping:
-      register: ping_result
+    - name: ICMP ping the host
+      command: ping -c 3 -W 2 {{ target_hosts }}
+      register: icmp_result
+      ignore_errors: yes
+      changed_when: false
 
-    - name: Display ping result
+    - name: Display ICMP ping result
       debug:
-        msg: "✓ Host {{ inventory_hostname }} is reachable (ping: {{ ping_result.ping }})"
+        msg: "{{ '✓' if icmp_result.rc == 0 else '✗' }} ICMP Ping: {{ 'Reachable' if icmp_result.rc == 0 else 'Unreachable' }}"
+
+    - name: Scan common ports with nmap
+      command: nmap -Pn --top-ports 20 -T4 {{ target_hosts }}
+      register: nmap_result
+      ignore_errors: yes
+      changed_when: false
+
+    - name: Display port scan results
+      debug:
+        msg: |
+          ====================================
+          PORT SCAN RESULTS (Top 20 Ports)
+          ====================================
+          {{ nmap_result.stdout | default('nmap not available or scan failed') }}
+          ====================================
+      when: nmap_result.rc == 0
+
+    - name: Display port scan error
+      debug:
+        msg: "✗ Port scan failed: {{ nmap_result.stderr | default('nmap may not be installed') }}"
+      when: nmap_result.rc != 0
+
+    - name: Test SSH connectivity (Ansible ping)
+      ansible.builtin.ping:
+      delegate_to: "{{ target_hosts }}"
+      register: ssh_result
+      ignore_errors: yes
+
+    - name: Display SSH connectivity result
+      debug:
+        msg: "{{ '✓' if ssh_result.ping is defined else '✗' }} SSH Connectivity: {{ 'Success' if ssh_result.ping is defined else 'Failed - ' + (ssh_result.msg | default('Unable to connect')) }}"

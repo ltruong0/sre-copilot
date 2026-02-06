@@ -18,9 +18,15 @@ logger = structlog.get_logger(__name__)
 
 def setup_logging(log_level: str, log_format: str) -> None:
     """Configure structlog."""
+    import logging
+
+    # Set the minimum log level
+    numeric_level = getattr(logging, log_level.upper(), logging.INFO)
+
     structlog.configure(
         processors=[
             structlog.stdlib.add_log_level,
+            structlog.stdlib.filter_by_level,
             structlog.stdlib.PositionalArgumentsFormatter(),
             structlog.processors.TimeStamper(fmt="iso"),
             structlog.processors.StackInfoRenderer(),
@@ -33,9 +39,12 @@ def setup_logging(log_level: str, log_format: str) -> None:
         ],
         wrapper_class=structlog.stdlib.BoundLogger,
         context_class=dict,
-        logger_factory=structlog.PrintLoggerFactory(),
+        logger_factory=structlog.stdlib.LoggerFactory(),
         cache_logger_on_first_use=True,
     )
+
+    # Configure root logger level
+    logging.basicConfig(format="%(message)s", level=numeric_level)
 
 
 @click.group()
@@ -264,23 +273,30 @@ def query(ctx: click.Context, question: str, top_k: int | None, path: str | None
 
 
 @main.command()
-@click.argument("question")
-@click.option("--dry-run", is_flag=True, help="Show what would be done without executing")
+@click.argument("question", required=False)
+@click.option("--execute", "-x", is_flag=True, help="Automatically execute suggested tools")
 @click.pass_context
-def ask(ctx: click.Context, question: str, dry_run: bool) -> None:
-    """Ask a question - can query docs OR execute ansible playbooks.
+def ask(ctx: click.Context, question: str | None, execute: bool) -> None:
+    """Ask a question - consults docs and suggests diagnostic tools.
+
+    Run without arguments to start an interactive chat session.
+    Or provide a question for a single query.
 
     Examples:
-        sre-copilot ask "What vulnerabilities are on dev-truong.fringe.ibm.com"
-        sre-copilot ask "Check security on all hosts"
-        sre-copilot ask "How do I troubleshoot a CrashLoopBackOff"
+        sre-copilot ask                                              # Interactive mode
+        sre-copilot ask "My app on dev-truong.fringe.ibm.com isn't working"
+        sre-copilot ask "dev-truong seems slow" --execute
     """
     settings = ctx.obj["settings"]
-    asyncio.run(_ask(settings, question, auto_execute=not dry_run))
+    debug = ctx.obj.get("debug", False)
+    if question:
+        asyncio.run(_ask_single(settings, question, auto_execute=execute))
+    else:
+        asyncio.run(_ask_interactive(settings, debug=debug))
 
 
-async def _ask(settings, question: str, auto_execute: bool) -> None:  # noqa: ANN001
-    """Run an agentic query that can execute tools."""
+async def _ask_single(settings, question: str, auto_execute: bool) -> None:  # noqa: ANN001
+    """Run a single agentic query."""
     from src.agent import SREAgent
     from src.rag.retriever import DocumentRetriever
 
@@ -300,27 +316,121 @@ async def _ask(settings, question: str, auto_execute: bool) -> None:  # noqa: AN
         settings=settings,
     )
 
-    mode_str = "EXECUTE MODE" if auto_execute else "DRY RUN"
-    console.print(f"[dim]Mode: {mode_str}[/dim]\n")
+    if auto_execute:
+        console.print("[dim]Mode: Auto-execute enabled[/dim]\n")
 
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
         console=console,
     ) as progress:
-        progress.add_task("Processing request...", total=None)
+        progress.add_task("Consulting documentation...", total=None)
         result = await agent.query(question, auto_execute=auto_execute)
 
-    if result.tool_used:
-        console.print(f"[bold]Tool used:[/bold] {result.tool_used}")
-
-    console.print("\n[bold]Answer:[/bold]")
     console.print(result.answer)
 
-    if result.rag_result and result.rag_result.sources:
-        console.print("\n[bold]Sources:[/bold]")
-        for source in result.rag_result.sources:
-            console.print(f"  - {source.document_path} ({source.breadcrumb})")
+
+async def _ask_interactive(settings, debug: bool = False) -> None:  # noqa: ANN001
+    """Run an interactive chat session with the agent."""
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.history import InMemoryHistory
+
+    from src.agent import SREAgent
+    from src.rag.retriever import DocumentRetriever
+
+    embedding_provider = get_embedding_provider(settings)
+    llm_provider = get_llm_provider(settings)
+
+    retriever = DocumentRetriever(
+        embedding_provider=embedding_provider,
+        chromadb_path=settings.chromadb_path,
+        top_k=settings.rag_top_k,
+        similarity_threshold=settings.rag_similarity_threshold,
+    )
+
+    agent = SREAgent(
+        llm_provider=llm_provider,
+        retriever=retriever,
+        settings=settings,
+    )
+
+    # Summarize output unless debug mode is on
+    summarize_output = not debug
+
+    console.print("[bold]SRE Copilot Interactive Mode[/bold]")
+    console.print("Type your questions or commands. Type 'exit' or 'quit' to leave.\n")
+    console.print("[dim]Tip: After suggestions, say 'yes' to run all tools,[/dim]")
+    console.print("[dim]     or mention a tool like 'ping it' or 'check security'.[/dim]\n")
+
+    session: PromptSession = PromptSession(history=InMemoryHistory())
+    last_suggestions: list[dict[str, str]] | None = None
+    context_host: str | None = None  # Track target host across conversation
+
+    while True:
+        try:
+            user_input = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: session.prompt("You: ")
+            )
+        except (EOFError, KeyboardInterrupt):
+            console.print("\n[dim]Goodbye![/dim]")
+            break
+
+        user_input = user_input.strip()
+        if not user_input:
+            continue
+
+        if user_input.lower() in ("exit", "quit", "q"):
+            console.print("[dim]Goodbye![/dim]")
+            break
+
+        # If we have previous suggestions, use LLM to understand what the user wants
+        if last_suggestions:
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                console=console,
+            ) as progress:
+                progress.add_task("Understanding request...", total=None)
+                tools_to_run = await agent.parse_tool_request(user_input, last_suggestions)
+
+            if tools_to_run:
+                console.print()
+                for tool_name in tools_to_run:
+                    # Get target from the suggestion for this tool
+                    target = "all"
+                    for suggestion in last_suggestions:
+                        if suggestion.get("tool") == tool_name:
+                            target = suggestion.get("target", "all")
+                            break
+
+                    with Progress(
+                        SpinnerColumn(),
+                        TextColumn("[progress.description]{task.description}"),
+                        console=console,
+                    ) as progress:
+                        progress.add_task(f"Running {tool_name}...", total=None)
+                        result = await agent.execute_tool(tool_name, target, summarize=summarize_output)
+                    console.print(result.answer)
+                    console.print()
+                last_suggestions = None
+                continue
+
+        # Regular query
+        console.print()
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            console=console,
+        ) as progress:
+            progress.add_task("Thinking...", total=None)
+            result = await agent.query(user_input, auto_execute=False, context_host=context_host)
+
+        console.print(f"[bold]Agent:[/bold] {result.answer}\n")
+
+        # Store suggestions and context for follow-up
+        last_suggestions = result.suggested_tools
+        if result.target_host:
+            context_host = result.target_host
 
 
 async def _query(settings, question: str, top_k: int, path_filter: str | None) -> None:  # noqa: ANN001
@@ -824,6 +934,54 @@ def ansible_host_info(ctx: click.Context, target_hosts: str) -> None:
             console.print(stdout)
     else:
         console.print("[red]✗ Failed to get host information[/red]\n")
+        if stderr:
+            console.print("[bold]Error:[/bold]")
+            console.print(stderr)
+        if stdout:
+            console.print("\n[bold]Output:[/bold]")
+            console.print(stdout)
+
+
+@ansible.command("ping")
+@click.argument("target_hosts")
+@click.pass_context
+def ansible_ping(ctx: click.Context, target_hosts: str) -> None:
+    """Check if target hosts are reachable.
+
+    Example: sre-copilot ansible ping dev-truong.fringe.ibm.com
+    Example: sre-copilot ansible ping all
+    """
+    settings = ctx.obj["settings"]
+
+    from src.mcp_servers.ansible_server import run_playbook
+
+    playbook_path = settings.ansible_playbooks_dir / "ping_host.yml"
+
+    if not playbook_path.exists():
+        console.print(f"[red]Ping playbook not found at {playbook_path}[/red]")
+        return
+
+    extra_vars = {"target_hosts": target_hosts}
+
+    console.print("[bold]Ping Host[/bold]")
+    console.print(f"[bold]Target hosts:[/bold] {target_hosts}")
+    console.print()
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+    ) as progress:
+        progress.add_task("Checking connectivity...", total=None)
+        success, stdout, stderr = run_playbook(playbook_path, extra_vars, settings, False)
+
+    if success:
+        console.print("[green]✓ Host is reachable[/green]\n")
+        if stdout:
+            console.print("[bold]Output:[/bold]")
+            console.print(stdout)
+    else:
+        console.print("[red]✗ Host unreachable or check failed[/red]\n")
         if stderr:
             console.print("[bold]Error:[/bold]")
             console.print(stderr)

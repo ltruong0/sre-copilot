@@ -15,7 +15,7 @@
     {
       "name": "ping_host",
       "playbook": "ping_host.yml",
-      "description": "Check if a host is reachable by pinging it via Ansible.",
+      "description": "Check if a host is reachable by pinging it via Ansible. And outlines open ports and services if host is reachable.",
       "keywords": ["ping", "reachable", "alive", "up", "connectivity", "connect", "reach", "online"]
     }
   ]
