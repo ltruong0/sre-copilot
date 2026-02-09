@@ -1,22 +1,19 @@
 {
   "tools": [
     {
+      "name": "ping_host",
+      "playbook": "ping_host.yml",
+      "description": "Check host reachability and open ports. Use when: 'is X up?', 'can we reach X?', 'ping X'. Requires: target (hostname or IP)"
+    },
+    {
       "name": "check_security",
       "playbook": "check_security_vulnerabilities.yml",
-      "description": "Run security vulnerability scan on hosts. Checks for CVEs, security patches, and vulnerabilities.",
-      "keywords": ["security", "vulnerability", "vulnerabilities", "cve", "scan", "patch", "secure"]
+      "description": "Scan for security vulnerabilities, CVEs, and missing patches. Use when: 'security scan X', 'vulnerabilities on X'. Requires: target (hostname or IP)"
     },
     {
       "name": "get_host_info",
       "playbook": "get_host_info.yml",
-      "description": "Get system information from hosts including OS version, CPU, RAM, disk space, network, and uptime.",
-      "keywords": ["info", "system", "host", "cpu", "ram", "memory", "disk", "space", "uptime", "os", "version"]
-    },
-    {
-      "name": "ping_host",
-      "playbook": "ping_host.yml",
-      "description": "Check if a host is reachable by pinging it via Ansible. And outlines open ports and services if host is reachable.",
-      "keywords": ["ping", "reachable", "alive", "up", "connectivity", "connect", "reach", "online"]
+      "description": "Get system info (OS, CPU, RAM, disk, uptime). Use when: 'system info for X', 'what's running on X'. Requires: target (hostname or IP)"
     }
   ]
 }
