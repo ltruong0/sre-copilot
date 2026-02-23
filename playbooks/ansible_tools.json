@@ -14,6 +14,11 @@
       "name": "get_host_info",
       "playbook": "get_host_info.yml",
       "description": "Get system info (OS, CPU, RAM, disk, uptime). Use when: 'system info for X', 'what's running on X'. Requires: target (hostname or IP)"
+    },
+    {
+      "name": "patch_vulnerabilities",
+      "playbook": "patch_vulnerabilities.yml",
+      "description": "Apply security patches and verify system is clean. Use when: 'patch X', 'fix vulnerabilities on X', 'remediate X'. Requires: target (hostname or IP)"
     }
   ]
 }

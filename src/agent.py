@@ -98,7 +98,21 @@ DOCUMENTATION:
 Provide a helpful answer based on the documentation."""
 
     # Keywords that trigger documentation lookup instead of tools
-    DOC_KEYWORDS = ["what is", "how to", "explain", "docs", "documentation", "tell me about", "describe", "overview"]
+    DOC_KEYWORDS = [
+        "what is", "what are", "how to", "how do", "how does",
+        "explain", "docs", "documentation", "tell me about", "describe", "overview",
+        "where is", "where are", "where can", "which", "list",
+        "environments", "architecture", "setup", "configure", "configuration",
+        "install", "deployment", "guide", "tutorial", "reference",
+        "about", "info", "information", "details", "summary",
+    ]
+
+    # Keywords that indicate a tool/diagnostic action (takes priority)
+    TOOL_KEYWORDS = [
+        "check", "scan", "run", "execute", "diagnose", "troubleshoot",
+        "ping", "security", "vulnerabilities", "host info", "system info",
+        "patch", "fix", "remediate", "apply patches",
+    ]
 
     def __init__(
         self,
@@ -193,9 +207,21 @@ Provide a helpful answer based on the documentation."""
             return text, None
 
     def _is_doc_query(self, question: str) -> bool:
-        """Check if question should use documentation instead of tools."""
+        """Check if question should use documentation instead of tools.
+
+        Tool keywords take priority - if a question asks to "check" or "scan",
+        it should run a tool even if it also contains doc keywords.
+        If neither matches, defaults to documentation (more common use case).
+        """
         question_lower = question.lower()
-        return any(kw in question_lower for kw in self.DOC_KEYWORDS)
+
+        # Tool keywords take priority - explicit diagnostic requests
+        if any(kw in question_lower for kw in self.TOOL_KEYWORDS):
+            return False
+
+        # Check for doc keywords OR default to docs if no tool keywords matched
+        # This ensures questions like "netbox enterprise" go to RAG, not tools
+        return True
 
     async def query(
         self,
