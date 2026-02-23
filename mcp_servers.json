@@ -1,6 +1,22 @@
 {
   "servers": [
     {
+      "name": "rag",
+      "description": "RAG documentation search server",
+      "command": "/Users/ltruong/Desktop/projects/sre-copilot/.venv/bin/sre-copilot",
+      "args": ["serve", "--server", "rag"],
+      "env": {},
+      "enabled": false
+    },
+    {
+      "name": "ansible",
+      "description": "Ansible playbook execution server for host diagnostics",
+      "command": "/Users/ltruong/Desktop/projects/sre-copilot/.venv/bin/sre-copilot",
+      "args": ["serve", "--server", "ansible"],
+      "env": {},
+      "enabled": false
+    },
+    {
       "name": "netbox",
       "description": "NetBox DCIM/IPAM server for querying network infrastructure",
       "command": "/Users/ltruong/Desktop/projects/netbox-watson-copilot/netbox-mcp-server/.venv/bin/netbox-mcp-server",
