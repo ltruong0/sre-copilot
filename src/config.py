@@ -62,6 +62,10 @@ class Settings(BaseSettings):
         default=None,
         description="Path to CA certificate for Ollama server (for self-signed certs)",
     )
+    ollama_verify_ssl: bool = Field(
+        default=True,
+        description="Verify SSL certificates for Ollama server",
+    )
 
     # watsonx settings
     watsonx_api_key: str | None = Field(
@@ -128,6 +132,10 @@ class Settings(BaseSettings):
         default=8080,
         description="MCP server port",
     )
+    mcp_servers_config: Path = Field(
+        default=Path("mcp_servers.json"),
+        description="Path to external MCP servers configuration file",
+    )
 
     # Logging
     log_level: str = Field(
@@ -192,6 +200,7 @@ def get_llm_provider(settings: Settings | None = None) -> "LLMProvider":
             base_url=settings.ollama_base_url,
             model=settings.ollama_model,
             ca_cert=settings.ollama_ca_cert,
+            verify_ssl=settings.ollama_verify_ssl,
         )
     elif settings.llm_provider == LLMProviderType.WATSONX:
         from src.providers.watsonx_provider import WatsonxLLMProvider
@@ -228,6 +237,7 @@ def get_embedding_provider(settings: Settings | None = None) -> "EmbeddingProvid
             base_url=settings.ollama_base_url,
             model=settings.ollama_embedding_model,
             ca_cert=settings.ollama_ca_cert,
+            verify_ssl=settings.ollama_verify_ssl,
         )
     elif settings.llm_provider == LLMProviderType.WATSONX:
         from src.providers.watsonx_provider import WatsonxEmbeddingProvider
@@ -261,6 +271,7 @@ def get_cleanup_provider(settings: Settings | None = None) -> "LLMProvider":
             base_url=settings.ollama_base_url,
             model=settings.ollama_cleanup_model,
             ca_cert=settings.ollama_ca_cert,
+            verify_ssl=settings.ollama_verify_ssl,
         )
     else:
         # For watsonx, use the same model for cleanup

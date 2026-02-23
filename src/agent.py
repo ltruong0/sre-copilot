@@ -4,7 +4,7 @@ import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import structlog
 
@@ -12,6 +12,9 @@ from src.config import Settings
 from src.mcp_servers.ansible_server import run_playbook
 from src.providers.base import LLMProvider
 from src.rag.retriever import DocumentRetriever
+
+if TYPE_CHECKING:
+    from src.mcp_client import MCPClientManager
 
 logger = structlog.get_logger(__name__)
 
@@ -62,44 +65,51 @@ class AgentResult:
     answer: str
     tool_used: str | None = None
     tool_output: str | None = None
-    suggested_tools: list[dict[str, str]] | None = None
     target_host: str | None = None
 
 
 class SREAgent:
     """Agent that consults documentation and can execute diagnostic tools."""
 
-    SYSTEM_PROMPT = """You are an SRE assistant. Answer the user's question directly and concisely.
+    # Prompt for tool-based queries (no documentation noise)
+    TOOL_PROMPT = """You are an SRE assistant. Use the appropriate tool to answer the question.
 
-CONTEXT (use only if relevant to the question):
-{context}
-
-AVAILABLE DIAGNOSTIC TOOLS:
+TOOLS:
 {tools}
 
-USER QUESTION: {question}
-TARGET HOST: {target_host}
+QUESTION: {question}
+CONTEXT HOST: {target_host}
 
-INSTRUCTIONS:
-- Be concise. Answer in 2-4 sentences unless more detail is needed.
-- IGNORE context that is not relevant to the user's question.
-- For informational questions, just answer - do NOT mention tools.
-- ONLY suggest tools when the user has a problem to diagnose AND mentions a host.
-- If suggesting tools, add this JSON at the very end:
+Pick the appropriate tool and return:
 ```json
-{{"suggested_tools": [{{"tool": "name", "target": "host", "reason": "why"}}]}}
+{{"tool": "tool_name", "target": "hostname_from_question"}}
 ```"""
+
+    # Prompt for documentation-based queries
+    DOC_PROMPT = """You are an SRE assistant. Answer the question using the documentation below.
+
+QUESTION: {question}
+
+DOCUMENTATION:
+{context}
+
+Provide a helpful answer based on the documentation."""
+
+    # Keywords that trigger documentation lookup instead of tools
+    DOC_KEYWORDS = ["what is", "how to", "explain", "docs", "documentation", "tell me about", "describe", "overview"]
 
     def __init__(
         self,
         llm_provider: LLMProvider,
         retriever: DocumentRetriever,
         settings: Settings,
+        mcp_client: "MCPClientManager | None" = None,
     ):
         """Initialize the agent."""
         self._llm_provider = llm_provider
         self._retriever = retriever
         self._settings = settings
+        self._mcp_client = mcp_client
 
         # Load tools from JSON config
         tools = load_ansible_tools(settings.ansible_playbooks_dir)
@@ -108,24 +118,42 @@ INSTRUCTIONS:
 
     def _extract_target_host(self, question: str) -> str | None:
         """Extract target host from a question, returns None if not found."""
-        # Check for FQDN patterns
-        fqdn_match = re.search(r'[\w.-]+\.[\w.-]+\.[\w.-]+', question)
+        # Common words that aren't hostnames
+        ignore_words = {"that", "this", "it", "the", "host", "server", "machine", "system", "all"}
+
+        # Check for FQDN patterns (must have at least 2 dots)
+        fqdn_match = re.search(r'[\w-]+\.[\w-]+\.[\w.-]+', question)
         if fqdn_match:
             return fqdn_match.group(0)
 
         # Check for "on <host>" or "for <host>" patterns
         match = re.search(r'\b(?:on|for)\s+([\w.-]+)', question)
         if match:
-            return match.group(1)
+            candidate = match.group(1).lower()
+            if candidate not in ignore_words:
+                return match.group(1)
 
         return None
 
     def _build_tools_description(self) -> str:
         """Build a description of available tools."""
         lines = []
-        for tool in self._tools_list:
-            lines.append(f"- {tool.name}: {tool.description}")
-        return "\n".join(lines) if lines else "No diagnostic tools available."
+
+        # Ansible/runbook tools
+        if self._tools_list:
+            lines.append("Runbook Tools (for host diagnostics):")
+            for tool in self._tools_list:
+                lines.append(f"  - {tool.name}: {tool.description}")
+
+        # External MCP tools
+        if self._mcp_client:
+            mcp_tools = self._mcp_client.get_all_tools()
+            if mcp_tools:
+                lines.append("\nExternal Tools (MCP):")
+                for tool in mcp_tools:
+                    lines.append(f"  - {tool.server_name}.{tool.name}: {tool.description}")
+
+        return "\n".join(lines) if lines else "No tools available."
 
     def _build_context(self, chunks: list) -> str:
         """Build context string from retrieved chunks."""
@@ -139,101 +167,117 @@ INSTRUCTIONS:
 
         return "\n\n---\n\n".join(context_parts)
 
-    def _parse_response(self, text: str) -> tuple[str, list[dict[str, str]] | None]:
-        """Parse LLM response to extract answer and suggested tools."""
-        # Try to find JSON block at the end
+    def _parse_response(self, text: str) -> tuple[str, dict[str, str] | None]:
+        """Parse LLM response to extract answer and tool request.
+
+        Returns:
+            Tuple of (answer_text, tool_request) where tool_request is
+            {"tool": "name", "target": "host"} or None.
+        """
+        # Try to find JSON block
         json_match = re.search(r'```json\s*(\{.*?\})\s*```', text, re.DOTALL)
 
         if json_match:
             answer = text[:json_match.start()].strip()
             try:
                 data = json.loads(json_match.group(1))
-                suggested = data.get("suggested_tools", [])
-                return answer, suggested if suggested else None
+                # New format: {"tool": "name", "target": "host"}
+                if "tool" in data and "target" in data:
+                    return answer, {"tool": data["tool"], "target": data["target"]}
+                return answer, None
             except json.JSONDecodeError:
                 return text, None
         else:
             return text, None
 
+    def _is_doc_query(self, question: str) -> bool:
+        """Check if question should use documentation instead of tools."""
+        question_lower = question.lower()
+        return any(kw in question_lower for kw in self.DOC_KEYWORDS)
+
     async def query(
         self,
         question: str,
-        auto_execute: bool = False,
         context_host: str | None = None,
     ) -> AgentResult:
-        """Process a query by consulting docs and suggesting/executing tools.
+        """Process a query - routes to tools or documentation based on keywords.
 
         Args:
             question: The user's question or issue description.
-            auto_execute: If True, automatically execute suggested tools.
             context_host: Host from previous conversation context (used if no new host mentioned).
 
         Returns:
-            AgentResult with the answer and any tool suggestions/executions.
+            AgentResult with the answer and any tool output.
         """
-        # Extract target host if mentioned, otherwise use context
-        target_host = self._extract_target_host(question) or context_host
-        logger.info("Processing query", target_host=target_host)
+        target_host = context_host
 
-        # Retrieve relevant documentation
-        chunks = await self._retriever.retrieve(question, top_k=self._settings.rag_top_k)
-        context = self._build_context(chunks)
+        # Check if this is a documentation query
+        if self._is_doc_query(question):
+            logger.info("Documentation query detected", question=question)
+            chunks = await self._retriever.retrieve(question, top_k=self._settings.rag_top_k)
+            context = self._build_context(chunks)
 
-        # Build and send prompt to LLM
-        prompt = self.SYSTEM_PROMPT.format(
-            context=context,
-            tools=self._build_tools_description(),
+            prompt = self.DOC_PROMPT.format(
+                question=question,
+                context=context,
+            )
+
+            result = await self._llm_provider.generate(
+                prompt=prompt,
+                max_tokens=1500,
+                temperature=0.3,
+            )
+
+            return AgentResult(
+                answer=result.text,
+                tool_used="rag",
+                target_host=target_host,
+            )
+
+        # Tool query - no documentation noise
+        logger.info("Tool query detected", question=question, context_host=target_host)
+        prompt = self.TOOL_PROMPT.format(
             question=question,
-            target_host=target_host or "not specified",
+            target_host=target_host or "none",
+            tools=self._build_tools_description(),
         )
 
         result = await self._llm_provider.generate(
             prompt=prompt,
-            max_tokens=1500,
-            temperature=0.3,
+            max_tokens=500,
+            temperature=0.1,
         )
 
-        # Parse response
-        answer, suggested_tools = self._parse_response(result.text)
+        # Parse response for tool request
+        answer, tool_request = self._parse_response(result.text)
 
-        # If auto_execute and tools were suggested, run them
-        if auto_execute and suggested_tools:
-            return await self._execute_tools(answer, suggested_tools)
+        if tool_request:
+            tool_name = tool_request["tool"]
+            tool_target = tool_request["target"]
 
-        # Format suggested tools for display and ensure they have the target
-        if suggested_tools:
-            # Ensure each suggestion has the target host
-            for suggestion in suggested_tools:
-                if not suggestion.get("target") or suggestion.get("target") == "host":
-                    suggestion["target"] = target_host or "all"
+            # Use context host if target is generic
+            if tool_target in ("host", "none", "", "hostname_from_question") and target_host:
+                tool_target = target_host
 
-            answer += "\n\n**I can run these diagnostics for you:**\n"
-            for suggestion in suggested_tools:
-                tool_name = suggestion.get("tool", "").replace("_", " ")
-                reason = suggestion.get("reason", "")
-                answer += f"- {tool_name}: {reason}\n"
-            answer += "\nJust say 'yes' to run all, or mention which ones you want (e.g., 'ping it', 'check security')."
+            logger.info("Executing tool", tool=tool_name, target=tool_target)
+            tool_result = await self.execute_tool(tool_name, tool_target)
 
+            combined = f"{answer}\n\n{tool_result.answer}" if answer else tool_result.answer
+            return AgentResult(
+                answer=combined,
+                tool_used=tool_name,
+                tool_output=tool_result.tool_output,
+                target_host=tool_target,
+            )
+
+        # Fallback if no tool was parsed
         return AgentResult(
-            answer=answer,
-            tool_used="rag",
-            suggested_tools=suggested_tools,
+            answer=answer or result.text,
+            tool_used=None,
             target_host=target_host,
         )
 
-    PARSE_TOOL_REQUEST_PROMPT = """These tools were suggested to the user:
-{suggested_tools}
-
-The user responded: "{request}"
-
-Which tools should be run? Return a JSON array of tool names.
-- If user agrees (yes/ok/sure/run them/etc), return ALL suggested tools
-- If user mentions specific ones (ping, security, info, etc), return only those
-- If unclear, return empty array
-
-JSON array:"""
-
-    SUMMARIZE_PROMPT = """Extract key metrics from this diagnostic output and format as a markdown table.
+    SUMMARIZE_PROMPT = """Summarize this tool output concisely.
 
 Tool: {tool_name}
 Target: {target_host}
@@ -242,67 +286,18 @@ Status: {status}
 Raw Output:
 {output}
 
-Output technical info in a table or structured format to provide clear and concise info.
-Extract relevant metrics based on the tool type:
-- For host info: hostname, OS, CPU, memory, disk usage, network IP, uptime, load average
-- For ping: reachability status, response time if available
-- For security: open ports, failed logins, package updates needed, suspicious processes
+Format the output based on the tool type:
+- For diagnostic tools (ping, security, host_info): extract key metrics as a markdown table
+- For inventory/data tools (netbox, search): list the found items with key attributes
+- For knowledge-based tools (docs search): summarize the key points in bullet form and provide sources
+- For other tools: present the key information clearly
 
-Assessment: [one sentence]
+Keep it concise. End with a short 2-3 sentence assessment.
 
 Output:"""
 
-    async def parse_tool_request(
-        self, request: str, suggested_tools: list[dict[str, str]]
-    ) -> list[str]:
-        """Parse a user request to identify which tools to run.
-
-        Args:
-            request: The user's natural language request.
-            suggested_tools: The tools that were suggested to the user.
-
-        Returns:
-            List of tool names to run.
-        """
-        if not suggested_tools:
-            return []
-
-        tools_desc = "\n".join(
-            f"- {t.get('tool')}: {t.get('reason', '')}" for t in suggested_tools
-        )
-
-        prompt = self.PARSE_TOOL_REQUEST_PROMPT.format(
-            suggested_tools=tools_desc,
-            request=request,
-        )
-
-        try:
-            result = await self._llm_provider.generate(
-                prompt=prompt,
-                max_tokens=100,
-                temperature=0.1,
-            )
-
-            # Parse JSON array from response
-            text = result.text.strip()
-            # Handle markdown code blocks
-            if "```" in text:
-                match = re.search(r'\[.*?\]', text, re.DOTALL)
-                if match:
-                    text = match.group(0)
-
-            tools = json.loads(text)
-            # Filter to only valid tools
-            valid_tools = [t for t in tools if t in self._tools]
-            logger.info("Parsed tool request", request=request, tools=valid_tools)
-            return valid_tools
-
-        except (json.JSONDecodeError, Exception) as e:
-            logger.warning("Failed to parse tool request", error=str(e))
-            return []
-
     async def execute_tool(
-        self, tool_name: str, target_host: str, summarize: bool = True
+        self, tool_name: str, target_host: str, summarize: bool = True, **kwargs: Any
     ) -> AgentResult:
         """Execute a specific tool on a target host.
 
@@ -310,10 +305,27 @@ Output:"""
             tool_name: Name of the tool to execute.
             target_host: Target host or host group.
             summarize: If True, summarize the output. If False, show raw output.
+            **kwargs: Additional arguments for MCP tools.
 
         Returns:
             AgentResult with the tool output.
         """
+        # Check if it's an MCP tool (format: server.tool_name)
+        if "." in tool_name and self._mcp_client:
+            return await self._execute_mcp_tool(tool_name, target_host, summarize, **kwargs)
+
+        # Try to find MCP tool by name (handles various naming formats)
+        if self._mcp_client:
+            for full_name, tool in self._mcp_client._tools.items():
+                # Direct match on tool name (e.g., "netbox_search_objects")
+                if tool_name == tool.name:
+                    return await self._execute_mcp_tool(full_name, target_host, summarize, **kwargs)
+                # Match "server_toolname" pattern (e.g., "netbox_search" -> "netbox.netbox_search")
+                if "_" in tool_name:
+                    server_name = full_name.split(".", 1)[0]
+                    if tool_name == f"{server_name}_{tool.name}":
+                        return await self._execute_mcp_tool(full_name, target_host, summarize, **kwargs)
+
         if tool_name not in self._tools:
             return AgentResult(
                 answer=f"Unknown tool: {tool_name}. Available tools: {', '.join(self._tools.keys())}",
@@ -370,22 +382,89 @@ Output:"""
             tool_output=stdout or stderr,
         )
 
-    async def _execute_tools(
-        self, base_answer: str, suggested_tools: list[dict[str, str]]
+    async def _execute_mcp_tool(
+        self, tool_name: str, target_host: str, summarize: bool = True, **kwargs: Any
     ) -> AgentResult:
-        """Execute all suggested tools and combine results."""
-        results = [base_answer, "\n\n**Diagnostic Results:**\n"]
+        """Execute an external MCP tool.
 
-        for suggestion in suggested_tools:
-            tool_name = suggestion.get("tool", "")
-            target = suggestion.get("target", "all")
+        Args:
+            tool_name: Full tool name (server.tool_name).
+            target_host: Target host (may be used as argument).
+            summarize: If True, summarize the output.
+            **kwargs: Additional arguments for the tool.
 
-            if tool_name in self._tools:
-                result = await self.execute_tool(tool_name, target)
-                results.append(f"\n### {tool_name}\n{result.answer}")
+        Returns:
+            AgentResult with the tool output.
+        """
+        if not self._mcp_client:
+            return AgentResult(
+                answer="MCP client not configured",
+                tool_used=None,
+            )
 
-        return AgentResult(
-            answer="\n".join(results),
-            tool_used="multiple",
-            tool_output=None,
-        )
+        logger.info("Executing MCP tool", tool=tool_name, target=target_host)
+
+        # Build arguments - include target_host using appropriate parameter name
+        arguments = dict(kwargs)
+        if target_host and target_host != "all":
+            # Check tool's input schema to find the right parameter name
+            tool_info = self._mcp_client._tools.get(tool_name)
+            if tool_info and tool_info.input_schema:
+                props = tool_info.input_schema.get("properties", {})
+                # Use first matching parameter type
+                if "query" in props:
+                    arguments["query"] = target_host
+                elif "search" in props:
+                    arguments["search"] = target_host
+                elif "name" in props:
+                    arguments["name"] = target_host
+                elif "host" in props:
+                    arguments["host"] = target_host
+                elif props:
+                    # Use the first required parameter or first property
+                    required = tool_info.input_schema.get("required", [])
+                    param = required[0] if required else list(props.keys())[0]
+                    arguments[param] = target_host
+            else:
+                # Fallback: use 'query' for search tools, 'host' otherwise
+                if "search" in tool_name.lower():
+                    arguments["query"] = target_host
+                else:
+                    arguments["host"] = target_host
+
+        try:
+            output = await self._mcp_client.call_tool(tool_name, arguments)
+
+            if summarize:
+                # Use LLM to summarize the output
+                summary_prompt = self.SUMMARIZE_PROMPT.format(
+                    tool_name=tool_name,
+                    target_host=target_host,
+                    status="Success",
+                    output=output[:3000],
+                )
+                try:
+                    result = await self._llm_provider.generate(
+                        prompt=summary_prompt,
+                        max_tokens=500,
+                        temperature=0.3,
+                    )
+                    answer = result.text.strip()
+                except Exception as e:
+                    logger.warning("Failed to summarize MCP output", error=str(e))
+                    answer = f"```\n{output}\n```"
+            else:
+                answer = f"```\n{output}\n```"
+
+            return AgentResult(
+                answer=answer,
+                tool_used=tool_name,
+                tool_output=output,
+            )
+
+        except Exception as e:
+            logger.error("MCP tool execution failed", tool=tool_name, error=str(e))
+            return AgentResult(
+                answer=f"Error executing {tool_name}: {str(e)}",
+                tool_used=tool_name,
+            )

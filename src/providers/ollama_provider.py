@@ -33,6 +33,7 @@ class OllamaEmbeddingProvider(EmbeddingProvider):
         model: str = "granite-embedding:278m",
         timeout: float = 60.0,
         ca_cert: Path | None = None,
+        verify_ssl: bool = True,
     ):
         """Initialize the Ollama embedding provider.
 
@@ -41,11 +42,13 @@ class OllamaEmbeddingProvider(EmbeddingProvider):
             model: Model name to use for embeddings.
             timeout: Request timeout in seconds.
             ca_cert: Path to CA certificate for SSL verification.
+            verify_ssl: Whether to verify SSL certificates.
         """
         self._base_url = base_url.rstrip("/")
         self._model = model
         self._timeout = timeout
         self._ca_cert = ca_cert
+        self._verify_ssl = verify_ssl
         self._client: httpx.AsyncClient | None = None
         self._dimension: int | None = self.KNOWN_DIMENSIONS.get(model)
 
@@ -65,8 +68,13 @@ class OllamaEmbeddingProvider(EmbeddingProvider):
     async def _get_client(self) -> httpx.AsyncClient:
         """Get or create the HTTP client."""
         if self._client is None or self._client.is_closed:
-            # Use CA cert if provided, otherwise use default verification
-            verify = str(self._ca_cert) if self._ca_cert else True
+            # Determine SSL verification setting
+            if not self._verify_ssl:
+                verify = False
+            elif self._ca_cert:
+                verify = str(self._ca_cert)
+            else:
+                verify = True
             self._client = httpx.AsyncClient(
                 base_url=self._base_url,
                 timeout=self._timeout,
@@ -189,6 +197,7 @@ class OllamaLLMProvider(LLMProvider):
         model: str = "granite4",
         timeout: float = 120.0,
         ca_cert: Path | None = None,
+        verify_ssl: bool = True,
     ):
         """Initialize the Ollama LLM provider.
 
@@ -197,11 +206,13 @@ class OllamaLLMProvider(LLMProvider):
             model: Model name to use for generation.
             timeout: Request timeout in seconds.
             ca_cert: Path to CA certificate for SSL verification.
+            verify_ssl: Whether to verify SSL certificates.
         """
         self._base_url = base_url.rstrip("/")
         self._model = model
         self._timeout = timeout
         self._ca_cert = ca_cert
+        self._verify_ssl = verify_ssl
         self._client: httpx.AsyncClient | None = None
 
     @property
@@ -212,8 +223,13 @@ class OllamaLLMProvider(LLMProvider):
     async def _get_client(self) -> httpx.AsyncClient:
         """Get or create the HTTP client."""
         if self._client is None or self._client.is_closed:
-            # Use CA cert if provided, otherwise use default verification
-            verify = str(self._ca_cert) if self._ca_cert else True
+            # Determine SSL verification setting
+            if not self._verify_ssl:
+                verify = False
+            elif self._ca_cert:
+                verify = str(self._ca_cert)
+            else:
+                verify = True
             self._client = httpx.AsyncClient(
                 base_url=self._base_url,
                 timeout=self._timeout,

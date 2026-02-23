@@ -277,28 +277,28 @@ def query(ctx: click.Context, question: str, top_k: int | None, path: str | None
 
 @main.command()
 @click.argument("question", required=False)
-@click.option("--execute", "-x", is_flag=True, help="Automatically execute suggested tools")
 @click.pass_context
-def ask(ctx: click.Context, question: str | None, execute: bool) -> None:
-    """Ask a question - consults docs and suggests diagnostic tools.
+def ask(ctx: click.Context, question: str | None) -> None:
+    """Ask a question - consults docs and runs diagnostic tools.
 
     Run without arguments to start an interactive chat session.
     Or provide a question for a single query.
 
+    The LLM decides whether to use documentation or run diagnostic tools.
+
     Examples:
         sre-copilot ask                                              # Interactive mode
         sre-copilot ask "My app on dev-truong.fringe.ibm.com isn't working"
-        sre-copilot ask "dev-truong seems slow" --execute
+        sre-copilot ask "Is dev-truong reachable?"
     """
     settings = ctx.obj["settings"]
-    debug = ctx.obj.get("debug", False)
     if question:
-        asyncio.run(_ask_single(settings, question, auto_execute=execute))
+        asyncio.run(_ask_single(settings, question))
     else:
-        asyncio.run(_ask_interactive(settings, debug=debug))
+        asyncio.run(_ask_interactive(settings))
 
 
-async def _ask_single(settings, question: str, auto_execute: bool) -> None:  # noqa: ANN001
+async def _ask_single(settings, question: str) -> None:  # noqa: ANN001
     """Run a single agentic query."""
     from src.agent import SREAgent
     from src.rag.retriever import DocumentRetriever
@@ -319,16 +319,13 @@ async def _ask_single(settings, question: str, auto_execute: bool) -> None:  # n
         settings=settings,
     )
 
-    if auto_execute:
-        console.print("[dim]Mode: Auto-execute enabled[/dim]\n")
-
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
         console=console,
     ) as progress:
-        progress.add_task("Consulting documentation...", total=None)
-        result = await agent.query(question, auto_execute=auto_execute)
+        progress.add_task("Processing...", total=None)
+        result = await agent.query(question)
 
     console.print(result.answer)
 
@@ -380,13 +377,14 @@ def _render_tool_output(tool_name: str, target: str, text: str) -> None:
     console.print(panel)
 
 
-async def _ask_interactive(settings, debug: bool = False) -> None:  # noqa: ANN001
+async def _ask_interactive(settings) -> None:  # noqa: ANN001
     """Run an interactive chat session with the agent."""
     from prompt_toolkit import PromptSession
     from prompt_toolkit.history import InMemoryHistory
     from rich.panel import Panel
 
     from src.agent import SREAgent
+    from src.mcp_client import MCPClientManager
     from src.rag.retriever import DocumentRetriever
 
     embedding_provider = get_embedding_provider(settings)
@@ -399,29 +397,59 @@ async def _ask_interactive(settings, debug: bool = False) -> None:  # noqa: ANN0
         similarity_threshold=settings.rag_similarity_threshold,
     )
 
+    # Initialize MCP client for external tools
+    mcp_client = None
+    if settings.mcp_servers_config.exists():
+        mcp_client = MCPClientManager(settings.mcp_servers_config)
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            console=console,
+        ) as progress:
+            progress.add_task("Connecting to MCP servers...", total=None)
+            try:
+                await mcp_client.connect_all()
+            except Exception as e:
+                console.print(f"[yellow]Warning: Failed to connect to MCP servers: {e}[/yellow]")
+                mcp_client = None
+
     agent = SREAgent(
         llm_provider=llm_provider,
         retriever=retriever,
         settings=settings,
+        mcp_client=mcp_client,
     )
 
-    # Summarize output unless debug mode is on
-    summarize_output = not debug
+    # Build tools summary for welcome banner
+    tools_summary = []
+
+    # Internal tools (ansible playbooks)
+    if agent._tools_list:
+        internal_names = [t.name for t in agent._tools_list]
+        tools_summary.append(f"[cyan]Runbooks:[/cyan] {', '.join(internal_names)}")
+
+    # External MCP tools
+    if mcp_client:
+        for server_name in mcp_client._servers:
+            mcp_tools = [t for t in mcp_client.get_all_tools() if t.server_name == server_name]
+            if mcp_tools:
+                tool_names = [t.name for t in mcp_tools]
+                tools_summary.append(f"[magenta]{server_name}:[/magenta] {', '.join(tool_names)}")
+
+    tools_display = "\n".join(tools_summary) if tools_summary else "[dim]No tools loaded[/dim]"
 
     # Welcome banner
     console.print(Panel(
         "[bold]SRE Copilot[/bold]\n\n"
         "Ask questions about your documentation or diagnose host issues.\n"
         "Type [cyan]exit[/cyan] or [cyan]quit[/cyan] to leave.\n\n"
-        "[dim]Tip: After suggestions, say 'yes' to run all tools,\n"
-        "or mention a tool like 'ping it' or 'check security'.[/dim]",
+        f"[bold]Loaded Tools:[/bold]\n{tools_display}",
         border_style="bright_black",
         width=min(console.width - 10, 70),
     ))
     console.print()
 
     session: PromptSession = PromptSession(history=InMemoryHistory())
-    last_suggestions: list[dict[str, str]] | None = None
     context_host: str | None = None  # Track target host across conversation
 
     while True:
@@ -445,53 +473,29 @@ async def _ask_interactive(settings, debug: bool = False) -> None:  # noqa: ANN0
         _render_user_message(user_input)
         console.print()
 
-        # If we have previous suggestions, use LLM to understand what the user wants
-        if last_suggestions:
-            with Progress(
-                SpinnerColumn(),
-                TextColumn("[progress.description]{task.description}"),
-                console=console,
-            ) as progress:
-                progress.add_task("Understanding request...", total=None)
-                tools_to_run = await agent.parse_tool_request(user_input, last_suggestions)
-
-            if tools_to_run:
-                for tool_name in tools_to_run:
-                    # Get target from the suggestion for this tool
-                    target = "all"
-                    for suggestion in last_suggestions:
-                        if suggestion.get("tool") == tool_name:
-                            target = suggestion.get("target", "all")
-                            break
-
-                    with Progress(
-                        SpinnerColumn(),
-                        TextColumn("[progress.description]{task.description}"),
-                        console=console,
-                    ) as progress:
-                        progress.add_task(f"Running {tool_name}...", total=None)
-                        result = await agent.execute_tool(tool_name, target, summarize=summarize_output)
-                    _render_tool_output(tool_name, target, result.answer)
-                    console.print()
-                last_suggestions = None
-                continue
-
-        # Regular query
+        # Query the agent - LLM decides whether to use tools or docs
         with Progress(
             SpinnerColumn(),
             TextColumn("[progress.description]{task.description}"),
             console=console,
         ) as progress:
             progress.add_task("Thinking...", total=None)
-            result = await agent.query(user_input, auto_execute=False, context_host=context_host)
+            result = await agent.query(user_input, context_host=context_host)
 
-        _render_agent_message(result.answer)
+        # If a tool was used, show as tool output; otherwise show as agent message
+        if result.tool_used and result.tool_used != "rag":
+            _render_tool_output(result.tool_used, result.target_host or "all", result.answer)
+        else:
+            _render_agent_message(result.answer)
         console.print()
 
-        # Store suggestions and context for follow-up
-        last_suggestions = result.suggested_tools
+        # Update context host for future queries
         if result.target_host:
             context_host = result.target_host
+
+    # Cleanup MCP connections
+    if mcp_client:
+        await mcp_client.disconnect_all()
 
 
 async def _query(settings, question: str, top_k: int, path_filter: str | None) -> None:  # noqa: ANN001
