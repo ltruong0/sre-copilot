@@ -377,6 +377,63 @@ def _render_tool_output(tool_name: str, target: str, text: str) -> None:
     console.print(panel)
 
 
+async def _load_docs_interactive(settings, embedding_provider, path_str: str) -> None:  # noqa: ANN001
+    """Load documents from a path during interactive session."""
+    from src.ingestion.chunker import Chunker
+    from src.ingestion.cleaner import DocumentCleaner
+    from src.ingestion.embedder import DocumentEmbedder
+    from src.ingestion.parser import DocumentParser
+
+    doc_path = Path(path_str).expanduser().resolve()
+
+    if not doc_path.exists():
+        console.print(f"[red]Path not found: {doc_path}[/red]")
+        return
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+    ) as progress:
+        progress.add_task(f"Loading docs from {doc_path.name}...", total=None)
+
+        parser = DocumentParser(doc_path)
+        cleaner = DocumentCleaner()
+        chunker = Chunker(
+            min_tokens=settings.chunk_min_tokens,
+            max_tokens=settings.chunk_max_tokens,
+            target_tokens=settings.chunk_target_tokens,
+        )
+        embedder = DocumentEmbedder(
+            embedding_provider=embedding_provider,
+            chromadb_path=settings.chromadb_path,
+        )
+
+        documents = parser.parse_all()
+        if not documents:
+            console.print(f"[yellow]No documents found in {doc_path}[/yellow]")
+            return
+
+        chunks_to_embed = []
+        for doc in documents:
+            cleaned_content, _ = cleaner.clean(doc.content)
+            chunks = chunker.chunk_document(
+                content=cleaned_content,
+                document_path=doc.relative_path,
+                content_hash=doc.content_hash,
+                category=doc.category,
+                tags=doc.tags,
+                title=doc.title,
+            )
+            chunks_to_embed.extend(chunks)
+
+        if chunks_to_embed:
+            embedded = await embedder.embed_chunks(chunks_to_embed)
+            console.print(f"[green]Loaded {len(documents)} docs ({embedded} chunks)[/green]")
+        else:
+            console.print("[yellow]No chunks generated[/yellow]")
+
+
 async def _ask_interactive(settings) -> None:  # noqa: ANN001
     """Run an interactive chat session with the agent."""
     from prompt_toolkit import PromptSession
@@ -441,9 +498,9 @@ async def _ask_interactive(settings) -> None:  # noqa: ANN001
     # Welcome banner
     console.print(Panel(
         "[bold]SRE Copilot[/bold]\n\n"
-        "Ask questions about your documentation or diagnose host issues.\n"
-        "Type [cyan]exit[/cyan] or [cyan]quit[/cyan] to leave.\n\n"
-        f"[bold]Loaded Tools:[/bold]\n{tools_display}",
+        "Ask questions about your documentation or diagnose host issues.\n\n"
+        f"[bold]Tools:[/bold] {tools_display}\n"
+        "[bold]Commands:[/bold] [cyan]/load <path>[/cyan] [cyan]/help[/cyan] [cyan]exit[/cyan]",
         border_style="bright_black",
         width=min(console.width - 10, 70),
     ))
@@ -468,6 +525,26 @@ async def _ask_interactive(settings) -> None:  # noqa: ANN001
         if user_input.lower() in ("exit", "quit", "q"):
             console.print("[dim]Goodbye![/dim]")
             break
+
+        # Handle /load command to ingest docs from a path
+        if user_input.startswith("/load "):
+            path_arg = user_input[6:].strip()
+            if path_arg:
+                await _load_docs_interactive(settings, embedding_provider, path_arg)
+            else:
+                console.print("[yellow]Usage: /load <path>[/yellow]")
+            continue
+
+        # Handle /help command
+        if user_input.lower() in ("/help", "help"):
+            console.print("[bold]Commands:[/bold]")
+            console.print("  /load <path>  - Ingest documents from a file or directory")
+            console.print("  /help         - Show this help")
+            console.print("  exit, quit, q - Exit the session")
+            console.print("\n[bold]Query Tips:[/bold]")
+            console.print("  • Use 'what is', 'explain', 'how to' for documentation lookups")
+            console.print("  • Other questions will try to use diagnostic tools")
+            continue
 
         # Show user message
         _render_user_message(user_input)

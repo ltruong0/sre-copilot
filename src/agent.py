@@ -72,7 +72,7 @@ class SREAgent:
     """Agent that consults documentation and can execute diagnostic tools."""
 
     # Prompt for tool-based queries (no documentation noise)
-    TOOL_PROMPT = """You are an SRE assistant. Use the appropriate tool to answer the question.
+    TOOL_PROMPT = """You are an SRE assistant with diagnostic tools.
 
 TOOLS:
 {tools}
@@ -80,10 +80,12 @@ TOOLS:
 QUESTION: {question}
 CONTEXT HOST: {target_host}
 
-Pick the appropriate tool and return:
+If the question requires running a diagnostic on a host, return:
 ```json
 {{"tool": "tool_name", "target": "hostname_from_question"}}
-```"""
+```
+
+If the question is a greeting or doesn't need a tool, just respond naturally without JSON."""
 
     # Prompt for documentation-based queries
     DOC_PROMPT = """You are an SRE assistant. Answer the question using the documentation below.
