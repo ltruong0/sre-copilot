@@ -1,6 +1,7 @@
 """MCP server for RAG-based documentation queries."""
 
 import asyncio
+from pathlib import Path
 from typing import Any
 
 import structlog
@@ -8,12 +9,11 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
 
-from src.config import Settings, get_embedding_provider, get_llm_provider
+from src.config import Settings, get_embedding_provider
 from src.ingestion.chunker import Chunker
 from src.ingestion.cleaner import DocumentCleaner
 from src.ingestion.embedder import DocumentEmbedder
 from src.ingestion.parser import DocumentParser
-from src.rag.generator import RAGGenerator
 from src.rag.retriever import DocumentRetriever
 
 logger = structlog.get_logger(__name__)
@@ -30,20 +30,13 @@ def create_server(settings: Settings) -> Server:
     """
     server = Server("sre-copilot-rag")
 
-    # Initialize providers
+    # Initialize embedding provider and retriever (no LLM needed)
     embedding_provider = get_embedding_provider(settings)
-    llm_provider = get_llm_provider(settings)
-
-    # Initialize RAG components
     retriever = DocumentRetriever(
         embedding_provider=embedding_provider,
         chromadb_path=settings.chromadb_path,
         top_k=settings.rag_top_k,
         similarity_threshold=settings.rag_similarity_threshold,
-    )
-    generator = RAGGenerator(
-        llm_provider=llm_provider,
-        retriever=retriever,
     )
 
     @server.list_tools()
@@ -51,48 +44,46 @@ def create_server(settings: Settings) -> Server:
         """List available tools."""
         return [
             Tool(
-                name="query_docs",
-                description="Query the SRE documentation to answer questions about OpenShift, Kubernetes, runbooks, and infrastructure operations.",
+                name="search_docs",
+                description="Search SRE documentation and return relevant chunks",
                 inputSchema={
                     "type": "object",
                     "properties": {
-                        "question": {
+                        "query": {
                             "type": "string",
-                            "description": "The question to answer based on the documentation",
+                            "description": "Search query",
                         },
                         "top_k": {
                             "type": "integer",
-                            "description": "Number of document chunks to retrieve (default: 5)",
+                            "description": "Number of results (default: 5)",
                             "default": 5,
                         },
-                        "category": {
-                            "type": "string",
-                            "description": "Optional category filter (e.g., 'runbook', 'architecture')",
-                        },
                     },
-                    "required": ["question"],
+                    "required": ["query"],
                 },
             ),
             Tool(
                 name="list_sources",
-                description="List all available documentation sources and categories.",
-                inputSchema={
-                    "type": "object",
-                    "properties": {},
-                },
+                description="List ingested doc sources and categories",
+                inputSchema={"type": "object", "properties": {}},
             ),
             Tool(
-                name="reingest",
-                description="Trigger re-ingestion of documentation. Use 'full' mode to re-embed all documents.",
+                name="ingest",
+                description="Ingest markdown docs into RAG database",
                 inputSchema={
                     "type": "object",
                     "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Path to docs directory or file",
+                        },
                         "full": {
                             "type": "boolean",
-                            "description": "If true, re-embed all documents regardless of changes",
+                            "description": "Re-embed all docs, not just changed",
                             "default": False,
                         },
                     },
+                    "required": ["path"],
                 },
             ),
         ]
@@ -102,53 +93,44 @@ def create_server(settings: Settings) -> Server:
         """Handle tool calls."""
         logger.info("Tool called", tool=name, arguments=arguments)
 
-        if name == "query_docs":
-            return await _handle_query_docs(generator, arguments)
+        if name == "search_docs":
+            return await _handle_search_docs(retriever, arguments)
         elif name == "list_sources":
             return await _handle_list_sources(retriever)
-        elif name == "reingest":
-            return await _handle_reingest(settings, arguments)
+        elif name == "ingest":
+            return await _handle_ingest(settings, arguments)
         else:
             return [TextContent(type="text", text=f"Unknown tool: {name}")]
 
     return server
 
 
-async def _handle_query_docs(
-    generator: RAGGenerator, arguments: dict[str, Any]
+async def _handle_search_docs(
+    retriever: DocumentRetriever, arguments: dict[str, Any]
 ) -> list[TextContent]:
-    """Handle query_docs tool call."""
-    question = arguments.get("question", "")
+    """Handle search_docs tool call - retrieval only, no LLM generation."""
+    query = arguments.get("query", "")
     top_k = arguments.get("top_k", 5)
-    category = arguments.get("category")
 
-    if not question:
-        return [TextContent(type="text", text="Error: question is required")]
+    if not query:
+        return [TextContent(type="text", text="Error: query is required")]
 
     try:
-        result = await generator.generate_answer(
-            question=question,
-            top_k=top_k,
-            category_filter=category,
-        )
+        chunks = await retriever.retrieve(query=query, top_k=top_k)
 
-        # Format response with sources
-        response_parts = [result.answer]
+        if not chunks:
+            return [TextContent(type="text", text="No relevant documents found.")]
 
-        if result.sources:
-            response_parts.append("\n\n**Sources:**")
-            seen_docs = set()
-            for source in result.sources:
-                doc_key = f"{source.document_path}:{source.breadcrumb}"
-                if doc_key not in seen_docs:
-                    seen_docs.add(doc_key)
-                    response_parts.append(f"- {source.breadcrumb} ({source.document_path})")
+        # Return chunks for the agent to synthesize
+        results = []
+        for chunk in chunks:
+            results.append(f"[{chunk.breadcrumb}] ({chunk.document_path})\n{chunk.content}")
 
-        return [TextContent(type="text", text="\n".join(response_parts))]
+        return [TextContent(type="text", text="\n\n---\n\n".join(results))]
 
     except Exception as e:
-        logger.error("Query failed", error=str(e))
-        return [TextContent(type="text", text=f"Error querying documentation: {e}")]
+        logger.error("Search failed", error=str(e))
+        return [TextContent(type="text", text=f"Error searching documentation: {e}")]
 
 
 async def _handle_list_sources(retriever: DocumentRetriever) -> list[TextContent]:
@@ -191,16 +173,24 @@ async def _handle_list_sources(retriever: DocumentRetriever) -> list[TextContent
         return [TextContent(type="text", text=f"Error listing sources: {e}")]
 
 
-async def _handle_reingest(
+async def _handle_ingest(
     settings: Settings, arguments: dict[str, Any]
 ) -> list[TextContent]:
-    """Handle reingest tool call."""
+    """Handle ingest tool call."""
+    path = arguments.get("path")
     full = arguments.get("full", False)
+
+    if not path:
+        return [TextContent(type="text", text="Error: path is required")]
+
+    docs_path = Path(path)
+    if not docs_path.exists():
+        return [TextContent(type="text", text=f"Error: path not found: {path}")]
 
     try:
         embedding_provider = get_embedding_provider(settings)
 
-        parser = DocumentParser(settings.docs_path)
+        parser = DocumentParser(docs_path)
         cleaner = DocumentCleaner()
         chunker = Chunker(
             min_tokens=settings.chunk_min_tokens,
@@ -248,27 +238,19 @@ async def _handle_reingest(
         # Remove orphaned documents
         current_paths = {doc.relative_path for doc in documents}
         orphaned = set(existing_hashes.keys()) - current_paths
-        for path in orphaned:
-            embedder.delete_document_chunks(path)
+        for orphan_path in orphaned:
+            embedder.delete_document_chunks(orphan_path)
             stats["orphaned"] += 1
 
         # Embed new/updated chunks
         if chunks_to_embed:
             await embedder.embed_chunks(chunks_to_embed)
 
-        response = f"""**Ingestion Complete**
-
-- New documents: {stats['new']}
-- Updated documents: {stats['updated']}
-- Skipped (unchanged): {stats['skipped']}
-- Removed orphans: {stats['orphaned']}
-- Total chunks embedded: {len(chunks_to_embed)}
-- Total chunks in database: {embedder.get_document_count()}"""
-
+        response = f"OK: {path}\nNew: {stats['new']}, Updated: {stats['updated']}, Skipped: {stats['skipped']}, Chunks: {len(chunks_to_embed)}"
         return [TextContent(type="text", text=response)]
 
     except Exception as e:
-        logger.error("Reingest failed", error=str(e))
+        logger.error("Ingest failed", error=str(e))
         return [TextContent(type="text", text=f"Error during ingestion: {e}")]
 
 
