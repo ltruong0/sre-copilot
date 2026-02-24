@@ -21,7 +21,7 @@ from src.config import Settings
 
 logger = structlog.get_logger(__name__)
 
-MAX_OUTPUT_LENGTH = 4000
+MAX_OUTPUT_LENGTH = 2000
 
 
 @dataclass
@@ -31,7 +31,7 @@ class AnsibleToolDef:
     name: str
     playbook: str
     description: str
-    keywords: list[str]
+    vars: dict[str, dict[str, Any]]
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "AnsibleToolDef":
@@ -40,8 +40,27 @@ class AnsibleToolDef:
             name=data["name"],
             playbook=data["playbook"],
             description=data["description"],
-            keywords=data.get("keywords", []),
+            vars=data.get("vars", {}),
         )
+
+    def build_input_schema(self) -> dict[str, Any]:
+        """Build MCP input schema from vars definition."""
+        properties = {}
+        required = []
+
+        for var_name, var_def in self.vars.items():
+            properties[var_name] = {
+                "type": var_def.get("type", "string"),
+                "description": var_def.get("description", ""),
+            }
+            if var_def.get("required", False):
+                required.append(var_name)
+
+        return {
+            "type": "object",
+            "properties": properties,
+            "required": required,
+        }
 
 
 def load_ansible_tools(playbooks_dir: Path) -> list[AnsibleToolDef]:
@@ -164,21 +183,7 @@ def create_server(settings: Settings) -> Server:
                 Tool(
                     name=tool_def.name,
                     description=tool_def.description,
-                    inputSchema={
-                        "type": "object",
-                        "properties": {
-                            "target_hosts": {
-                                "type": "string",
-                                "description": "Target hosts or host group (e.g., 'all', 'webservers', 'host1.example.com')",
-                            },
-                            "check_mode": {
-                                "type": "boolean",
-                                "description": "Run in check mode (dry run) without making changes",
-                                "default": False,
-                            },
-                        },
-                        "required": ["target_hosts"],
-                    },
+                    inputSchema=tool_def.build_input_schema(),
                 )
             )
 
@@ -244,56 +249,27 @@ def _execute_ansible_tool(
     tool_def: AnsibleToolDef, arguments: dict[str, Any], settings: Settings
 ) -> list[TextContent]:
     """Execute an ansible tool from the registry."""
-    target_hosts = arguments.get("target_hosts")
-    check_mode = arguments.get("check_mode", False)
-
-    if not target_hosts:
-        return [TextContent(type="text", text="Error: target_hosts is required")]
+    # Validate required vars
+    extra_vars = {}
+    for var_name, var_def in tool_def.vars.items():
+        value = arguments.get(var_name)
+        if var_def.get("required") and not value:
+            return [TextContent(type="text", text=f"Error: {var_name} is required")]
+        if value is not None:
+            extra_vars[var_name] = value
 
     playbook_path = settings.ansible_playbooks_dir / tool_def.playbook
 
     if not playbook_path.exists():
-        return [
-            TextContent(
-                type="text",
-                text=f"Error: Playbook not found at {playbook_path}",
-            )
-        ]
+        return [TextContent(type="text", text=f"Error: Playbook not found: {tool_def.playbook}")]
 
-    extra_vars = {"target_hosts": target_hosts}
-    mode_str = "CHECK MODE (dry run)" if check_mode else "EXECUTE MODE"
+    success, stdout, stderr = run_playbook(playbook_path, extra_vars, settings)
 
-    success, stdout, stderr = run_playbook(playbook_path, extra_vars, settings, check_mode)
-
+    target = extra_vars.get("target_hosts", "")
     if success:
-        response = f"""**{tool_def.description}**
-
-Mode: {mode_str}
-Target Hosts: {target_hosts}
-Status: ✓ Completed successfully
-
-**Output:**
-```
-{stdout}
-```"""
+        return [TextContent(type="text", text=f"OK: {target}\n{stdout}")]
     else:
-        response = f"""**{tool_def.description}**
-
-Mode: {mode_str}
-Target Hosts: {target_hosts}
-Status: ✗ Failed
-
-**Error:**
-```
-{stderr}
-```
-
-**Output:**
-```
-{stdout}
-```"""
-
-    return [TextContent(type="text", text=response)]
+        return [TextContent(type="text", text=f"FAILED: {target}\n{stderr}\n{stdout}")]
 
 
 def _run_playbook(arguments: dict[str, Any], settings: Settings) -> list[TextContent]:
@@ -317,37 +293,12 @@ def _run_playbook(arguments: dict[str, Any], settings: Settings) -> list[TextCon
             )
         ]
 
-    mode_str = "CHECK MODE (dry run)" if check_mode else "EXECUTE MODE"
-
     success, stdout, stderr = run_playbook(playbook_path, extra_vars, settings, check_mode)
 
     if success:
-        response = f"""**Playbook Execution - {mode_str}**
-
-Playbook: {playbook_name}
-Extra Variables: {json.dumps(extra_vars) if extra_vars else 'None'}
-Status: ✓ Completed successfully
-
-**Output:**
-```
-{stdout}
-```"""
+        response = f"OK: {playbook_name}\n{stdout}"
     else:
-        response = f"""**Playbook Execution - {mode_str}**
-
-Playbook: {playbook_name}
-Extra Variables: {json.dumps(extra_vars) if extra_vars else 'None'}
-Status: ✗ Failed
-
-**Error:**
-```
-{stderr}
-```
-
-**Output:**
-```
-{stdout}
-```"""
+        response = f"FAILED: {playbook_name}\n{stderr}\n{stdout}"
 
     return [TextContent(type="text", text=response)]
 
@@ -364,22 +315,7 @@ def _list_playbooks(settings: Settings) -> list[TextContent]:
             )
         ]
 
-    # Also load tool definitions to show which have tools
-    ansible_tools = load_ansible_tools(settings.ansible_playbooks_dir)
-    tool_playbooks = {t.playbook: t.name for t in ansible_tools}
-
-    response = f"""**Available Playbooks**
-
-Directory: {settings.ansible_playbooks_dir}
-
-Playbooks:
-"""
-    for playbook in playbooks:
-        if playbook in tool_playbooks:
-            response += f"  - {playbook} (tool: {tool_playbooks[playbook]})\n"
-        else:
-            response += f"  - {playbook}\n"
-
+    response = "Playbooks:\n" + "\n".join(f"- {p}" for p in playbooks)
     return [TextContent(type="text", text=response)]
 
 

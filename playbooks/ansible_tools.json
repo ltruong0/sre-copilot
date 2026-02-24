@@ -3,22 +3,34 @@
     {
       "name": "ping_host",
       "playbook": "ping_host.yml",
-      "description": "Check host reachability and open ports. Use when: 'is X up?', 'can we reach X?', 'ping X'. Requires: target (hostname or IP)"
+      "description": "Check if host is reachable",
+      "vars": {
+        "target_hosts": {"type": "string", "required": true, "description": "Host or group"}
+      }
     },
     {
       "name": "check_security",
       "playbook": "check_security_vulnerabilities.yml",
-      "description": "Scan for security vulnerabilities, CVEs, and missing patches. Use when: 'security scan X', 'vulnerabilities on X'. Requires: target (hostname or IP)"
+      "description": "Scan for CVEs and missing security patches",
+      "vars": {
+        "target_hosts": {"type": "string", "required": true, "description": "Host or group"}
+      }
     },
     {
       "name": "get_host_info",
       "playbook": "get_host_info.yml",
-      "description": "Get system info (OS, CPU, RAM, disk, uptime). Use when: 'system info for X', 'what's running on X'. Requires: target (hostname or IP)"
+      "description": "Get OS, CPU, RAM, disk, uptime",
+      "vars": {
+        "target_hosts": {"type": "string", "required": true, "description": "Host or group"}
+      }
     },
     {
       "name": "patch_vulnerabilities",
       "playbook": "patch_vulnerabilities.yml",
-      "description": "Apply security patches and verify system is clean. Use when: 'patch X', 'fix vulnerabilities on X', 'remediate X'. Requires: target (hostname or IP)"
+      "description": "Apply security patches",
+      "vars": {
+        "target_hosts": {"type": "string", "required": true, "description": "Host or group"}
+      }
     }
   ]
 }
