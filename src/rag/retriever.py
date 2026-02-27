@@ -108,6 +108,14 @@ class DocumentRetriever:
             self._collection = client.get_collection(name=COLLECTION_NAME)
         return self._collection
 
+    def invalidate_collection_cache(self) -> None:
+        """Invalidate the cached collection reference.
+
+        Call this after ingestion to ensure the retriever fetches
+        a fresh collection reference on the next query.
+        """
+        self._collection = None
+
     async def retrieve(
         self,
         query: str,

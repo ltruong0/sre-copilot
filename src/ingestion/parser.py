@@ -61,6 +61,19 @@ class DocumentParser:
             logger.warning("Documentation path does not exist", path=str(self.base_path))
             return []
 
+        # Handle single file
+        if self.base_path.is_file():
+            if self.base_path.suffix.lower() in self.SUPPORTED_EXTENSIONS:
+                logger.info("Discovered single document", path=str(self.base_path))
+                return [self.base_path]
+            else:
+                logger.warning(
+                    "File is not a supported markdown format",
+                    path=str(self.base_path),
+                    supported=list(self.SUPPORTED_EXTENSIONS),
+                )
+                return []
+
         files = []
         for ext in self.SUPPORTED_EXTENSIONS:
             files.extend(self.base_path.rglob(f"*{ext}"))
@@ -103,10 +116,14 @@ class DocumentParser:
         content_hash = hashlib.sha256(content.encode()).hexdigest()
 
         # Make path relative to base_path
-        try:
-            relative_path = file_path.relative_to(self.base_path)
-        except ValueError:
-            relative_path = file_path
+        # If base_path is a file (single file ingest), use just the filename
+        if self.base_path.is_file():
+            relative_path = file_path.name
+        else:
+            try:
+                relative_path = file_path.relative_to(self.base_path)
+            except ValueError:
+                relative_path = file_path
 
         return Document(
             path=relative_path,

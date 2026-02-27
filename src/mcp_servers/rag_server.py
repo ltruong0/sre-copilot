@@ -98,7 +98,7 @@ def create_server(settings: Settings) -> Server:
         elif name == "list_sources":
             return await _handle_list_sources(retriever)
         elif name == "ingest":
-            return await _handle_ingest(settings, arguments)
+            return await _handle_ingest(settings, retriever, arguments)
         else:
             return [TextContent(type="text", text=f"Unknown tool: {name}")]
 
@@ -174,7 +174,7 @@ async def _handle_list_sources(retriever: DocumentRetriever) -> list[TextContent
 
 
 async def _handle_ingest(
-    settings: Settings, arguments: dict[str, Any]
+    settings: Settings, retriever: DocumentRetriever, arguments: dict[str, Any]
 ) -> list[TextContent]:
     """Handle ingest tool call."""
     path = arguments.get("path")
@@ -245,6 +245,9 @@ async def _handle_ingest(
         # Embed new/updated chunks
         if chunks_to_embed:
             await embedder.embed_chunks(chunks_to_embed)
+
+        # Invalidate retriever's cached collection so next search uses fresh data
+        retriever.invalidate_collection_cache()
 
         response = f"OK: {path}\nNew: {stats['new']}, Updated: {stats['updated']}, Skipped: {stats['skipped']}, Chunks: {len(chunks_to_embed)}"
         return [TextContent(type="text", text=response)]
