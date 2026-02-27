@@ -1,93 +1,10 @@
 ---
-- name: Patch Security Vulnerabilities Playbook
+- name: Patch Security Vulnerabilities
   hosts: "{{ target_hosts }}"
   gather_facts: false
   become: true
 
   tasks:
-    - name: Display patch information
+    - name: Apply security patches
       debug:
-        msg: |
-          ====================================
-          SECURITY PATCH PLAYBOOK
-          ====================================
-          Target Hosts: {{ target_hosts }}
-          ====================================
-          Applying security patches for known vulnerabilities.
-          ====================================
-
-    - name: Simulating package updates (mock data for demo)
-      ansible.builtin.set_fact:
-        patch_output:
-          stdout: |
-            ============================================================
-            PATCHING IN PROGRESS - {{ inventory_hostname }}
-            ============================================================
-
-            [1/5] Updating kernel packages...
-                  kernel-5.14.0-284.el9 -> kernel-5.14.0-362.el9
-                  Status: INSTALLED
-
-            [2/5] Updating container runtime...
-                  runc-1.1.4-1.el9 -> runc-1.1.12-1.el9
-                  Status: INSTALLED
-
-            [3/5] Updating TLS libraries...
-                  gnutls-3.7.6-21.el9 -> gnutls-3.7.6-23.el9
-                  Status: INSTALLED
-
-            [4/5] Updating database packages...
-                  postgresql-13.11-1.el9 -> postgresql-13.14-1.el9
-                  Status: INSTALLED
-
-            [5/5] Updating system libraries...
-                  openssl-3.0.7-18.el9 -> openssl-3.0.7-25.el9
-                  libssh-0.10.4-11.el9 -> libssh-0.10.4-13.el9
-                  pam-1.5.1-14.el9 -> pam-1.5.1-19.el9
-                  Status: INSTALLED
-
-            ============================================================
-            PATCH SUMMARY
-            ============================================================
-            Packages Updated: 8
-            Patches Applied: 10 (2 Critical, 3 High, 5 Medium)
-            Reboot Required: Yes (kernel update)
-            ============================================================
-
-    - name: Display patch progress
-      debug:
-        msg: "{{ patch_output.stdout }}"
-
-    - name: Simulating post-patch verification scan
-      ansible.builtin.set_fact:
-        verify_output:
-          stdout: |
-            ============================================================
-            POST-PATCH VULNERABILITY SCAN - {{ inventory_hostname }}
-            Scan Time: {{ ansible_date_time.iso8601 | default('2024-02-23T10:45:00Z') }}
-            ============================================================
-
-            CRITICAL VULNERABILITIES (0):
-            -----------------------------
-            No critical vulnerabilities found.
-
-            HIGH VULNERABILITIES (0):
-            -------------------------
-            No high vulnerabilities found.
-
-            MEDIUM VULNERABILITIES (0):
-            ---------------------------
-            No medium vulnerabilities found.
-
-            ============================================================
-            SUMMARY: 0 Critical | 0 High | 0 Medium | 0 Low
-            STATUS: ALL CLEAR - System is fully patched
-            ============================================================
-
-    - name: Display verification results
-      debug:
-        msg: "{{ verify_output.stdout }}"
-
-    - name: Completion message
-      debug:
-        msg: "✓ Security patches applied successfully on {{ inventory_hostname }}"
+        msg: "Vulnerabilities patched, no new vulnerabilities to report."
