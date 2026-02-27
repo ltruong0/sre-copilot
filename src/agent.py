@@ -9,7 +9,11 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from src.config import Settings
-from src.mcp_servers.ansible_server import run_playbook
+from src.mcp_servers.ansible_server import (
+    AnsibleToolDef,
+    load_ansible_tools,
+    run_playbook,
+)
 from src.providers.base import LLMProvider
 from src.rag.retriever import DocumentRetriever
 
@@ -17,45 +21,6 @@ if TYPE_CHECKING:
     from src.mcp_client import MCPClientManager
 
 logger = structlog.get_logger(__name__)
-
-
-@dataclass
-class AnsibleTool:
-    """Definition of an ansible-based tool."""
-
-    name: str
-    playbook: str
-    description: str
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "AnsibleTool":
-        """Create an AnsibleTool from a dictionary."""
-        return cls(
-            name=data["name"],
-            playbook=data["playbook"],
-            description=data["description"],
-        )
-
-
-def load_ansible_tools(playbooks_dir: Path) -> list[AnsibleTool]:
-    """Load ansible tools from the JSON config file."""
-    config_path = playbooks_dir / "ansible_tools.json"
-
-    if not config_path.exists():
-        logger.warning("ansible_tools.json not found", path=str(config_path))
-        return []
-
-    try:
-        with open(config_path) as f:
-            data = json.load(f)
-
-        tools = [AnsibleTool.from_dict(t) for t in data.get("tools", [])]
-        logger.info("Loaded ansible tools", count=len(tools))
-        return tools
-
-    except (json.JSONDecodeError, KeyError) as e:
-        logger.error("Failed to load ansible_tools.json", error=str(e))
-        return []
 
 
 @dataclass
@@ -127,7 +92,7 @@ Provide a helpful answer based on the documentation."""
         self._settings = settings
         self._mcp_client = mcp_client
 
-        # Load tools from JSON config
+        # Load tools from playbook mcp_meta comments
         tools = load_ansible_tools(settings.ansible_playbooks_dir)
         self._tools = {tool.name: tool for tool in tools}
         self._tools_list = tools
@@ -159,7 +124,10 @@ Provide a helpful answer based on the documentation."""
         if self._tools_list:
             lines.append("Runbook Tools (for host diagnostics):")
             for tool in self._tools_list:
-                lines.append(f"  - {tool.name}: {tool.description}")
+                desc = tool.description
+                if tool.destructive:
+                    desc = f"[DESTRUCTIVE] {desc}"
+                lines.append(f"  - {tool.name}: {desc}")
 
         # External MCP tools
         if self._mcp_client:

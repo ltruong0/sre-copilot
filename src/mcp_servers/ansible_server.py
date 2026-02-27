@@ -2,17 +2,19 @@
 
 This server provides tools for running Ansible playbooks and interacting
 with OpenShift/Kubernetes clusters. Tools are dynamically loaded from
-playbooks/ansible_tools.json.
+embedded metadata in playbook files (# mcp_meta: comments).
 """
 
 import asyncio
 import json
+import re
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import structlog
+import yaml
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
@@ -31,16 +33,20 @@ class AnsibleToolDef:
     name: str
     playbook: str
     description: str
-    vars: dict[str, dict[str, Any]]
+    vars: dict[str, dict[str, Any]] = field(default_factory=dict)
+    destructive: bool = False
+    keywords: list[str] = field(default_factory=list)
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "AnsibleToolDef":
-        """Create from a dictionary."""
+    def from_dict(cls, data: dict[str, Any], playbook_filename: str) -> "AnsibleToolDef":
+        """Create from a dictionary (parsed from mcp_meta comment)."""
         return cls(
             name=data["name"],
-            playbook=data["playbook"],
-            description=data["description"],
+            playbook=playbook_filename,
+            description=data.get("description", ""),
             vars=data.get("vars", {}),
+            destructive=data.get("destructive", False),
+            keywords=data.get("keywords", []),
         )
 
     def build_input_schema(self) -> dict[str, Any]:
@@ -56,6 +62,14 @@ class AnsibleToolDef:
             if var_def.get("required", False):
                 required.append(var_name)
 
+        # Add confirm parameter for destructive tools
+        if self.destructive:
+            properties["confirm"] = {
+                "type": "boolean",
+                "description": "Set to true to confirm execution of this destructive operation. "
+                "If false or omitted, runs in check mode (dry run) first.",
+            }
+
         return {
             "type": "object",
             "properties": properties,
@@ -63,25 +77,102 @@ class AnsibleToolDef:
         }
 
 
-def load_ansible_tools(playbooks_dir: Path) -> list[AnsibleToolDef]:
-    """Load ansible tools from the JSON config file."""
-    config_path = playbooks_dir / "ansible_tools.json"
+def parse_mcp_meta(playbook_path: Path) -> dict[str, Any] | None:
+    """Parse mcp_meta comment block from a playbook file.
 
-    if not config_path.exists():
-        logger.warning("ansible_tools.json not found", path=str(config_path))
-        return []
+    Looks for a comment block at the top of the file in the format:
+        # mcp_meta:
+        #   name: tool_name
+        #   description: Tool description
+        #   destructive: false
+        #   vars:
+        #     var_name: {type: string, required: true, description: "Var desc"}
 
+    Returns:
+        Parsed metadata dict or None if no mcp_meta block found.
+    """
     try:
-        with open(config_path) as f:
-            data = json.load(f)
+        content = playbook_path.read_text()
+    except Exception as e:
+        logger.warning("Failed to read playbook", path=str(playbook_path), error=str(e))
+        return None
 
-        tools = [AnsibleToolDef.from_dict(t) for t in data.get("tools", [])]
-        logger.info("Loaded ansible tools for MCP", count=len(tools))
-        return tools
+    # Look for # mcp_meta: block at the start of the file
+    lines = content.split("\n")
+    meta_lines = []
+    in_meta_block = False
 
-    except (json.JSONDecodeError, KeyError) as e:
-        logger.error("Failed to load ansible_tools.json", error=str(e))
+    for line in lines:
+        stripped = line.strip()
+
+        # Start of mcp_meta block
+        if stripped == "# mcp_meta:":
+            in_meta_block = True
+            meta_lines.append("mcp_meta:")
+            continue
+
+        # Inside mcp_meta block - collect indented comment lines
+        if in_meta_block:
+            if stripped.startswith("#") and len(stripped) > 1:
+                # Remove the leading "# " or "#" and preserve indentation
+                comment_content = line.lstrip("#").rstrip()
+                if comment_content.startswith(" "):
+                    comment_content = comment_content[1:]  # Remove single leading space
+                # Check if this looks like a continuation (indented)
+                if comment_content and (comment_content[0] == " " or comment_content.strip()):
+                    meta_lines.append(comment_content)
+                else:
+                    break
+            else:
+                # End of comment block (non-comment line or empty comment)
+                break
+
+    if not meta_lines:
+        return None
+
+    # Parse the collected lines as YAML
+    try:
+        yaml_content = "\n".join(meta_lines)
+        parsed = yaml.safe_load(yaml_content)
+        if parsed and "mcp_meta" in parsed:
+            return parsed["mcp_meta"]
+    except yaml.YAMLError as e:
+        logger.warning("Failed to parse mcp_meta YAML", path=str(playbook_path), error=str(e))
+
+    return None
+
+
+def load_ansible_tools(playbooks_dir: Path) -> list[AnsibleToolDef]:
+    """Load ansible tools by scanning playbook files for mcp_meta comments."""
+    if not playbooks_dir.exists():
+        logger.warning("Playbooks directory not found", path=str(playbooks_dir))
         return []
+
+    tools = []
+
+    # Scan all .yml and .yaml files
+    for pattern in ("*.yml", "*.yaml"):
+        for playbook_path in playbooks_dir.glob(pattern):
+            meta = parse_mcp_meta(playbook_path)
+            if meta and "name" in meta:
+                try:
+                    tool = AnsibleToolDef.from_dict(meta, playbook_path.name)
+                    tools.append(tool)
+                    logger.debug(
+                        "Loaded tool from playbook",
+                        tool=tool.name,
+                        playbook=playbook_path.name,
+                        destructive=tool.destructive,
+                    )
+                except (KeyError, TypeError) as e:
+                    logger.warning(
+                        "Invalid mcp_meta in playbook",
+                        path=str(playbook_path),
+                        error=str(e),
+                    )
+
+    logger.info("Loaded ansible tools from playbooks", count=len(tools))
+    return tools
 
 
 def run_playbook(
@@ -168,21 +259,26 @@ def create_server(settings: Settings) -> Server:
     """
     server = Server("sre-copilot-ansible")
 
-    # Load tools from JSON config
+    # Load tools from playbook mcp_meta comments
     ansible_tools = load_ansible_tools(settings.ansible_playbooks_dir)
     tools_by_name = {tool.name: tool for tool in ansible_tools}
 
     @server.list_tools()
     async def list_tools() -> list[Tool]:
-        """List available tools - dynamically generated from ansible_tools.json."""
+        """List available tools - dynamically generated from playbook mcp_meta."""
         tools = []
 
-        # Add tools from JSON config
+        # Add tools from playbook metadata
         for tool_def in ansible_tools:
+            # Indicate destructive tools in description
+            description = tool_def.description
+            if tool_def.destructive:
+                description = f"[DESTRUCTIVE] {description}"
+
             tools.append(
                 Tool(
                     name=tool_def.name,
-                    description=tool_def.description,
+                    description=description,
                     inputSchema=tool_def.build_input_schema(),
                 )
             )
@@ -263,13 +359,33 @@ def _execute_ansible_tool(
     if not playbook_path.exists():
         return [TextContent(type="text", text=f"Error: Playbook not found: {tool_def.playbook}")]
 
-    success, stdout, stderr = run_playbook(playbook_path, extra_vars, settings)
+    # Handle destructive tools - require confirmation or run in check mode
+    confirmed = arguments.get("confirm", False)
+    check_mode = tool_def.destructive and not confirmed
+
+    if tool_def.destructive and not confirmed:
+        logger.info(
+            "Running destructive playbook in check mode",
+            playbook=tool_def.playbook,
+            tool=tool_def.name,
+        )
+
+    success, stdout, stderr = run_playbook(playbook_path, extra_vars, settings, check_mode)
 
     target = extra_vars.get("target_hosts", "")
-    if success:
-        return [TextContent(type="text", text=f"OK: {target}\n{stdout}")]
+
+    # Build response with check mode indicator
+    if check_mode:
+        prefix = f"[CHECK MODE - No changes made] {tool_def.name} on {target}\n"
+        suffix = "\n\nTo execute for real, call again with confirm=true"
     else:
-        return [TextContent(type="text", text=f"FAILED: {target}\n{stderr}\n{stdout}")]
+        prefix = ""
+        suffix = ""
+
+    if success:
+        return [TextContent(type="text", text=f"{prefix}OK: {target}\n{stdout}{suffix}")]
+    else:
+        return [TextContent(type="text", text=f"{prefix}FAILED: {target}\n{stderr}\n{stdout}{suffix}")]
 
 
 def _run_playbook(arguments: dict[str, Any], settings: Settings) -> list[TextContent]:

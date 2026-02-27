@@ -1,3 +1,10 @@
+# mcp_meta:
+#   name: check_security
+#   description: Scan for CVEs and missing security patches
+#   destructive: false
+#   keywords: [security, vulnerabilities, cve, patches, scan]
+#   vars:
+#     target_hosts: {type: string, required: true, description: "Host or group to scan"}
 ---
 - name: Check Security Vulnerabilities Playbook
   hosts: "{{ target_hosts }}"

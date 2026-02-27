@@ -1,3 +1,10 @@
+# mcp_meta:
+#   name: patch_vulnerabilities
+#   description: Apply security patches to fix known vulnerabilities
+#   destructive: true
+#   keywords: [patch, fix, remediate, update, security]
+#   vars:
+#     target_hosts: {type: string, required: true, description: "Host or group to patch"}
 ---
 - name: Patch Security Vulnerabilities
   hosts: "{{ target_hosts }}"

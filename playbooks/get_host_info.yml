@@ -1,7 +1,14 @@
+# mcp_meta:
+#   name: get_host_info
+#   description: Get OS, CPU, RAM, disk, and uptime information
+#   destructive: false
+#   keywords: [info, system, os, cpu, memory, disk, uptime, hardware]
+#   vars:
+#     target_hosts: {type: string, required: true, description: "Host or group to query"}
 ---
 - name: Get Host Information Playbook
   hosts: "{{ target_hosts }}"
-  gather_facts: yes
+  gather_facts: true
   become: true
 
   tasks:

@@ -35,12 +35,13 @@ src/
 │   └── generator.py    # Answer generation with sources
 └── mcp_servers/        # MCP protocol implementations
     ├── rag_server.py   # Documentation queries
-    └── ansible_server.py # Ansible playbook execution (loads from ansible_tools.json)
+    └── ansible_server.py # Ansible playbook execution (parses mcp_meta from playbooks)
 
-playbooks/              # Ansible playbooks and tool definitions
-├── ansible_tools.json  # Tool registry (name, playbook, description, keywords)
-├── check_security_vulnerabilities.yml
-└── get_host_info.yml
+playbooks/              # Ansible playbooks with embedded mcp_meta
+├── check_security_vulnerabilities.yml  # Security scan (non-destructive)
+├── get_host_info.yml                   # System info (non-destructive)
+├── patch_vulnerabilities.yml           # Apply patches (destructive)
+└── ping_host.yml                       # Connectivity check (non-destructive)
 ```
 
 ## Key Commands
@@ -112,22 +113,36 @@ def mycommand(ctx: click.Context) -> None:
 Add to `rag_server.py` in `list_tools()` and `call_tool()` handlers.
 
 ### New Ansible Tool
-Add to `playbooks/ansible_tools.json` - no Python code changes needed:
-```json
-{
-  "name": "my_tool",
-  "playbook": "my_playbook.yml",
-  "description": "What this tool does",
-  "keywords": ["keyword1", "keyword2"]
-}
+Add a `# mcp_meta:` comment block at the top of your playbook - no separate config needed:
+```yaml
+# mcp_meta:
+#   name: my_tool
+#   description: What this tool does
+#   destructive: false
+#   keywords: [keyword1, keyword2]
+#   vars:
+#     target_hosts: {type: string, required: true, description: "Host or group"}
+---
+- name: My Playbook
+  hosts: "{{ target_hosts }}"
+  ...
 ```
+
+**Fields:**
+- `name` (required): Tool name used in MCP and CLI
+- `description` (required): What the tool does
+- `destructive` (optional, default: false): If true, requires `confirm=true` to execute (otherwise runs in check mode)
+- `keywords` (optional): Array of keywords for agent routing
+- `vars` (optional): Input variables with type, required flag, and description
+
 The tool will be automatically available in:
-- CLI agent (`sre-copilot ask`)
-- MCP ansible server
-- Keyword matching uses the `keywords` array to route natural language queries
+- CLI: `sre-copilot ansible list` shows all tools with metadata
+- CLI agent: `sre-copilot ask` routes queries based on keywords
+- MCP ansible server: Exposes tools with proper input schemas
 
 ### Agent Architecture
 The agent (`src/agent.py`) orchestrates between tools:
-1. Tries keyword matching from `ansible_tools.json` first (fast path)
-2. Falls back to LLM decision if no keywords match
+1. Parses `# mcp_meta:` from playbooks to discover tools
+2. Routes queries based on keywords or LLM decision
 3. Executes matched tool or uses RAG for documentation questions
+4. Destructive tools run in check mode first unless explicitly confirmed

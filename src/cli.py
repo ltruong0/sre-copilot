@@ -904,10 +904,14 @@ def ansible(ctx: click.Context) -> None:
 @ansible.command("list")
 @click.pass_context
 def ansible_list(ctx: click.Context) -> None:
-    """List available Ansible playbooks."""
+    """List available Ansible playbooks with their MCP metadata."""
     settings = ctx.obj["settings"]
 
-    from src.mcp_servers.ansible_server import _get_available_playbooks
+    from src.mcp_servers.ansible_server import _get_available_playbooks, load_ansible_tools
+
+    # Load tools with metadata
+    tools = load_ansible_tools(settings.ansible_playbooks_dir)
+    tools_by_playbook = {tool.playbook: tool for tool in tools}
 
     playbooks = _get_available_playbooks(settings)
 
@@ -917,7 +921,16 @@ def ansible_list(ctx: click.Context) -> None:
 
     console.print(f"[bold]Available Playbooks[/bold] ({settings.ansible_playbooks_dir})\n")
     for playbook in playbooks:
-        console.print(f"  - {playbook}")
+        tool = tools_by_playbook.get(playbook)
+        if tool:
+            destructive_tag = "[red][DESTRUCTIVE][/red] " if tool.destructive else ""
+            console.print(f"  [cyan]{tool.name}[/cyan] ({playbook})")
+            console.print(f"    {destructive_tag}{tool.description}")
+            if tool.vars:
+                vars_str = ", ".join(f"{k}" for k in tool.vars.keys())
+                console.print(f"    [dim]vars: {vars_str}[/dim]")
+        else:
+            console.print(f"  - {playbook} [dim](no mcp_meta)[/dim]")
 
 
 @ansible.command("run")
