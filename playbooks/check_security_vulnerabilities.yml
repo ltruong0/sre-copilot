@@ -1,5 +1,5 @@
 # mcp_meta:
-#   name: check_security
+#   name: check_security_vulnerabilities
 #   description: Scan for CVEs and missing security patches
 #   destructive: false
 #   keywords: [security, vulnerabilities, cve, patches, scan]
